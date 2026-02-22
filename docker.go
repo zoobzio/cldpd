@@ -1,6 +1,7 @@
 package cldpd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -54,30 +55,18 @@ func (d *DockerRunner) Preflight(ctx context.Context) error {
 	return nil
 }
 
-// Build builds a Docker image tagged with tag from the Dockerfile in dir.
-func (d *DockerRunner) Build(ctx context.Context, tag string, dir string, buildArgs map[string]string) error {
+// buildCmdArgs returns the docker CLI arguments for a build invocation.
+func buildCmdArgs(tag string, dir string, buildArgs map[string]string) []string {
 	args := []string{"build", "-t", tag}
 	for k, v := range buildArgs {
 		args = append(args, "--build-arg", k+"="+v)
 	}
 	args = append(args, dir)
-
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return fmt.Errorf("%w: exit code %d", ErrBuildFailed, exitErr.ExitCode())
-		}
-		return fmt.Errorf("%w: %w", ErrBuildFailed, err)
-	}
-	return nil
+	return args
 }
 
-// Run starts a container with the given options, streams stdout, and blocks
-// until the container exits. Returns the container's exit code.
-func (d *DockerRunner) Run(ctx context.Context, opts RunOptions, stdout io.Writer) (int, error) {
+// runCmdArgs returns the docker CLI arguments for a run invocation.
+func runCmdArgs(opts RunOptions) []string {
 	args := []string{"run"}
 	if opts.Remove {
 		args = append(args, "--rm")
@@ -93,6 +82,36 @@ func (d *DockerRunner) Run(ctx context.Context, opts RunOptions, stdout io.Write
 	}
 	args = append(args, opts.Image)
 	args = append(args, opts.Cmd...)
+	return args
+}
+
+// execCmdArgs returns the docker CLI arguments for an exec invocation.
+func execCmdArgs(container string, cmd []string) []string {
+	return append([]string{"exec", container}, cmd...)
+}
+
+// Build builds a Docker image tagged with tag from the Dockerfile in dir.
+func (d *DockerRunner) Build(ctx context.Context, tag string, dir string, buildArgs map[string]string) error {
+	args := buildCmdArgs(tag, dir, buildArgs)
+
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Stdout = io.Discard
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return fmt.Errorf("%w: exit code %d: %s", ErrBuildFailed, exitErr.ExitCode(), stderr.String())
+		}
+		return fmt.Errorf("%w: %w", ErrBuildFailed, err)
+	}
+	return nil
+}
+
+// Run starts a container with the given options, streams stdout, and blocks
+// until the container exits. Returns the container's exit code.
+func (d *DockerRunner) Run(ctx context.Context, opts RunOptions, stdout io.Writer) (int, error) {
+	args := runCmdArgs(opts)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Stdout = stdout
@@ -122,7 +141,7 @@ func (d *DockerRunner) Exec(ctx context.Context, container string, cmd []string,
 		return -1, fmt.Errorf("%s: %w", container, ErrSessionNotFound)
 	}
 
-	args := append([]string{"exec", container}, cmd...)
+	args := execCmdArgs(container, cmd)
 	c := exec.CommandContext(ctx, "docker", args...)
 	c.Stdout = stdout
 	c.Stderr = io.Discard

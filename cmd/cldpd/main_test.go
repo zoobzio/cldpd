@@ -173,3 +173,70 @@ func TestRunStart_ErrorsGoToStderr(t *testing.T) {
 		t.Error("error should appear on stderr")
 	}
 }
+
+// TestRunStart_PodNotFound exercises the path through Preflight, DefaultPodsDir,
+// and d.Start — all of which succeed or fail gracefully with a nonexistent pod.
+func TestRunStart_PodNotFound(t *testing.T) {
+	// Redirect stderr to suppress noise.
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open devnull: %v", err)
+	}
+	defer devnull.Close()
+	old := os.Stderr
+	os.Stderr = devnull
+	defer func() { os.Stderr = old }()
+
+	// Flags must come before positional args for flag.Parse to see them.
+	// If Docker is unavailable, runStart exits at Preflight with code 1.
+	// If Docker is available, it exits at d.Start (pod not found) with code 1.
+	// Either way, code must be non-zero.
+	code := runStart(context.Background(), []string{"--issue", "https://github.com/org/repo/issues/1", "__nonexistent_test_pod__"})
+	if code == 0 {
+		t.Errorf("exit code: got 0, want non-zero")
+	}
+}
+
+// TestRunResume_SessionNotFound exercises the path through DefaultPodsDir and
+// d.Resume with a nonexistent container.
+func TestRunResume_SessionNotFound(t *testing.T) {
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open devnull: %v", err)
+	}
+	defer devnull.Close()
+	old := os.Stderr
+	os.Stderr = devnull
+	defer func() { os.Stderr = old }()
+
+	// No running container named cldpd-__nonexistent__ — Resume returns non-zero.
+	code := runResume(context.Background(), []string{"--prompt", "do something", "__nonexistent_test_pod__"})
+	// code may be -1 or 1 depending on the error; either way, non-zero.
+	if code == 0 {
+		t.Errorf("exit code: got 0, want non-zero")
+	}
+}
+
+// TestCLI_Help verifies that the help subcommand exits 0 and prints usage.
+func TestCLI_Help(t *testing.T) {
+	bin := buildCLI(t)
+	_, stderr, code := runCLI(t, bin, "help")
+	if code != 0 {
+		t.Errorf("exit code: got %d, want 0", code)
+	}
+	if !strings.Contains(stderr, "Usage:") {
+		t.Errorf("stderr should contain usage, got: %q", stderr)
+	}
+}
+
+// TestCLI_HelpFlag verifies that --help exits 0 and prints usage.
+func TestCLI_HelpFlag(t *testing.T) {
+	bin := buildCLI(t)
+	_, stderr, code := runCLI(t, bin, "--help")
+	if code != 0 {
+		t.Errorf("exit code: got %d, want 0", code)
+	}
+	if !strings.Contains(stderr, "Usage:") {
+		t.Errorf("stderr should contain usage, got: %q", stderr)
+	}
+}

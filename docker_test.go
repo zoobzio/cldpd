@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os/exec"
 	"testing"
 )
 
@@ -38,148 +39,304 @@ func (m *mockRunner) Exec(ctx context.Context, container string, cmd []string, s
 	return 0, nil
 }
 
-// Verify mockRunner satisfies Runner interface at compile time.
+// Compile-time interface assertions.
+var _ Runner = (*DockerRunner)(nil)
 var _ Runner = (*mockRunner)(nil)
 
-// Verify DockerRunner satisfies Runner interface at compile time.
-var _ Runner = (*DockerRunner)(nil)
-
-func TestRunner_InterfaceSatisfied(t *testing.T) {
-	// Compile-time assertions above; this test documents the requirement.
-	var _ Runner = (*DockerRunner)(nil)
-	var _ Runner = (*mockRunner)(nil)
+func TestBuildCmdArgs_Minimal(t *testing.T) {
+	args := buildCmdArgs("myimage:latest", "/some/dir", nil)
+	want := []string{"build", "-t", "myimage:latest", "/some/dir"}
+	if len(args) != len(want) {
+		t.Fatalf("args: got %v, want %v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Errorf("args[%d]: got %q, want %q", i, args[i], want[i])
+		}
+	}
 }
 
-func TestMockRunner_Build_Success(t *testing.T) {
-	called := false
-	r := &mockRunner{
-		buildFn: func(ctx context.Context, tag string, dir string, buildArgs map[string]string) error {
-			called = true
-			if tag != "myimage" {
-				t.Errorf("tag: got %q, want %q", tag, "myimage")
-			}
-			if dir != "/some/dir" {
-				t.Errorf("dir: got %q, want %q", dir, "/some/dir")
-			}
-			return nil
-		},
+func TestBuildCmdArgs_WithBuildArgs(t *testing.T) {
+	args := buildCmdArgs("img", "/dir", map[string]string{"KEY": "val"})
+	// Must contain --build-arg KEY=val before the dir.
+	var foundBuildArg bool
+	for i, a := range args {
+		if a == "--build-arg" && i+1 < len(args) && args[i+1] == "KEY=val" {
+			foundBuildArg = true
+		}
 	}
-	err := r.Build(context.Background(), "myimage", "/some/dir", nil)
+	if !foundBuildArg {
+		t.Errorf("args missing --build-arg KEY=val: %v", args)
+	}
+	if args[len(args)-1] != "/dir" {
+		t.Errorf("last arg should be dir, got %q", args[len(args)-1])
+	}
+}
+
+func TestRunCmdArgs_Minimal(t *testing.T) {
+	opts := RunOptions{Image: "myimage"}
+	args := runCmdArgs(opts)
+	if args[0] != "run" {
+		t.Errorf("args[0]: got %q, want %q", args[0], "run")
+	}
+	// Last arg should be the image.
+	if args[len(args)-1] != "myimage" {
+		t.Errorf("last arg: got %q, want %q", args[len(args)-1], "myimage")
+	}
+}
+
+func TestRunCmdArgs_WithAllOptions(t *testing.T) {
+	opts := RunOptions{
+		Image:   "myimage:latest",
+		Name:    "cldpd-myrepo",
+		Cmd:     []string{"claude", "-p", "prompt"},
+		Env:     map[string]string{"FOO": "bar"},
+		Workdir: "/workspace",
+		Remove:  true,
+	}
+	args := runCmdArgs(opts)
+
+	var hasRM, hasName, hasEnv, hasWorkdir bool
+	for i, a := range args {
+		switch a {
+		case "--rm":
+			hasRM = true
+		case "--name":
+			if i+1 < len(args) && args[i+1] == "cldpd-myrepo" {
+				hasName = true
+			}
+		case "-e":
+			if i+1 < len(args) && args[i+1] == "FOO=bar" {
+				hasEnv = true
+			}
+		case "-w":
+			if i+1 < len(args) && args[i+1] == "/workspace" {
+				hasWorkdir = true
+			}
+		}
+	}
+	if !hasRM {
+		t.Error("missing --rm")
+	}
+	if !hasName {
+		t.Error("missing --name cldpd-myrepo")
+	}
+	if !hasEnv {
+		t.Error("missing -e FOO=bar")
+	}
+	if !hasWorkdir {
+		t.Error("missing -w /workspace")
+	}
+	// Image and cmd should be at the end.
+	var imageIdx int
+	for i, a := range args {
+		if a == "myimage:latest" {
+			imageIdx = i
+		}
+	}
+	if imageIdx == 0 {
+		t.Error("image not found in args")
+	}
+	// Cmd elements should follow image.
+	if len(args) < imageIdx+4 {
+		t.Errorf("cmd not found after image: %v", args)
+	}
+}
+
+func TestExecCmdArgs(t *testing.T) {
+	args := execCmdArgs("cldpd-myrepo", []string{"claude", "--resume", "-p", "prompt"})
+	want := []string{"exec", "cldpd-myrepo", "claude", "--resume", "-p", "prompt"}
+	if len(args) != len(want) {
+		t.Fatalf("args: got %v, want %v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Errorf("args[%d]: got %q, want %q", i, args[i], want[i])
+		}
+	}
+}
+
+func TestRunCmdArgs_NoRemove(t *testing.T) {
+	opts := RunOptions{Image: "img", Remove: false}
+	args := runCmdArgs(opts)
+	for _, a := range args {
+		if a == "--rm" {
+			t.Error("--rm should not be present when Remove=false")
+		}
+	}
+}
+
+func TestRunCmdArgs_NoName(t *testing.T) {
+	opts := RunOptions{Image: "img"}
+	args := runCmdArgs(opts)
+	for i, a := range args {
+		if a == "--name" {
+			t.Errorf("--name should not be present when Name is empty, found at %d", i)
+		}
+	}
+}
+
+func TestRunCmdArgs_NoWorkdir(t *testing.T) {
+	opts := RunOptions{Image: "img"}
+	args := runCmdArgs(opts)
+	for i, a := range args {
+		if a == "-w" {
+			t.Errorf("-w should not be present when Workdir is empty, found at %d", i)
+		}
+	}
+}
+
+// dockerAvailable reports whether the Docker daemon is reachable.
+func dockerAvailable() bool {
+	cmd := exec.Command("docker", "info")
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run() == nil
+}
+
+func TestDockerRunner_Preflight_Available(t *testing.T) {
+	if !dockerAvailable() {
+		t.Skip("Docker not available")
+	}
+	r := &DockerRunner{}
+	err := r.Preflight(context.Background())
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !called {
-		t.Error("Build was not called")
+		t.Errorf("Preflight failed with Docker available: %v", err)
 	}
 }
 
-func TestMockRunner_Build_Error(t *testing.T) {
-	r := &mockRunner{
-		buildFn: func(_ context.Context, _ string, _ string, _ map[string]string) error {
-			return ErrBuildFailed
-		},
+func TestDockerRunner_Preflight_ContextCancelled(t *testing.T) {
+	if !dockerAvailable() {
+		t.Skip("Docker not available")
 	}
-	err := r.Build(context.Background(), "tag", "/dir", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	r := &DockerRunner{}
+	err := r.Preflight(ctx)
+	if err == nil {
+		t.Error("expected error with cancelled context, got nil")
+	}
+	if !errors.Is(err, ErrDockerUnavailable) {
+		t.Errorf("got %v, want ErrDockerUnavailable", err)
+	}
+}
+
+func TestDockerRunner_Build_InvalidDir(t *testing.T) {
+	if !dockerAvailable() {
+		t.Skip("Docker not available")
+	}
+	r := &DockerRunner{}
+	err := r.Build(context.Background(), "cldpd-test-build-invalid", "/nonexistent/path/that/does/not/exist", nil)
+	if err == nil {
+		t.Error("expected error building from nonexistent dir, got nil")
+	}
 	if !errors.Is(err, ErrBuildFailed) {
 		t.Errorf("got %v, want ErrBuildFailed", err)
 	}
 }
 
-func TestMockRunner_Run_PassesThroughOutput(t *testing.T) {
-	var buf bytes.Buffer
-	r := &mockRunner{
-		runFn: func(_ context.Context, _ RunOptions, stdout io.Writer) (int, error) {
-			_, _ = stdout.Write([]byte("hello from container"))
-			return 0, nil
-		},
+func TestDockerRunner_Run_HelloWorld(t *testing.T) {
+	if !dockerAvailable() {
+		t.Skip("Docker not available")
 	}
-	code, err := r.Run(context.Background(), RunOptions{Image: "img", Name: "c"}, &buf)
+	var buf bytes.Buffer
+	r := &DockerRunner{}
+	opts := RunOptions{
+		Image:  "alpine:latest",
+		Name:   "cldpd-test-unit-run-hello",
+		Cmd:    []string{"echo", "hello"},
+		Remove: true,
+	}
+	code, err := r.Run(context.Background(), opts, &buf)
+	// Clean up in case --rm didn't fire.
+	exec.Command("docker", "rm", "-f", "cldpd-test-unit-run-hello").Run() //nolint:errcheck
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("Run failed: %v", err)
 	}
 	if code != 0 {
 		t.Errorf("exit code: got %d, want 0", code)
 	}
-	if buf.String() != "hello from container" {
-		t.Errorf("output: got %q, want %q", buf.String(), "hello from container")
-	}
 }
 
-func TestMockRunner_Run_NonZeroExitCode(t *testing.T) {
-	r := &mockRunner{
-		runFn: func(_ context.Context, _ RunOptions, _ io.Writer) (int, error) {
-			return 2, nil
-		},
+func TestDockerRunner_Run_NonZeroExit(t *testing.T) {
+	if !dockerAvailable() {
+		t.Skip("Docker not available")
 	}
-	code, err := r.Run(context.Background(), RunOptions{Image: "img"}, io.Discard)
+	r := &DockerRunner{}
+	opts := RunOptions{
+		Image:  "alpine:latest",
+		Name:   "cldpd-test-unit-run-exit2",
+		Cmd:    []string{"sh", "-c", "exit 2"},
+		Remove: true,
+	}
+	code, err := r.Run(context.Background(), opts, io.Discard)
+	exec.Command("docker", "rm", "-f", "cldpd-test-unit-run-exit2").Run() //nolint:errcheck
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected process error: %v", err)
 	}
 	if code != 2 {
 		t.Errorf("exit code: got %d, want 2", code)
 	}
 }
 
-func TestMockRunner_Exec_PassesThroughOutput(t *testing.T) {
-	var buf bytes.Buffer
-	r := &mockRunner{
-		execFn: func(_ context.Context, container string, cmd []string, stdout io.Writer) (int, error) {
-			if container != "cldpd-myrepo" {
-				t.Errorf("container: got %q, want %q", container, "cldpd-myrepo")
-			}
-			_, _ = stdout.Write([]byte("exec output"))
-			return 0, nil
-		},
+func TestDockerRunner_Exec_ContainerNotFound(t *testing.T) {
+	if !dockerAvailable() {
+		t.Skip("Docker not available")
 	}
-	code, err := r.Exec(context.Background(), "cldpd-myrepo", []string{"echo", "hi"}, &buf)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if code != 0 {
-		t.Errorf("exit code: got %d, want 0", code)
-	}
-	if buf.String() != "exec output" {
-		t.Errorf("output: got %q, want %q", buf.String(), "exec output")
-	}
-}
-
-func TestMockRunner_Exec_SessionNotFound(t *testing.T) {
-	r := &mockRunner{
-		execFn: func(_ context.Context, container string, _ []string, _ io.Writer) (int, error) {
-			return -1, ErrSessionNotFound
-		},
-	}
-	_, err := r.Exec(context.Background(), "cldpd-missing", []string{"claude"}, io.Discard)
+	r := &DockerRunner{}
+	_, err := r.Exec(context.Background(), "cldpd-test-unit-nonexistent", []string{"echo", "hi"}, io.Discard)
 	if !errors.Is(err, ErrSessionNotFound) {
 		t.Errorf("got %v, want ErrSessionNotFound", err)
 	}
 }
 
-func TestRunOptions_Fields(t *testing.T) {
+func TestDockerRunner_Exec_ContainerNotRunning(t *testing.T) {
+	if !dockerAvailable() {
+		t.Skip("Docker not available")
+	}
+	// Create a stopped container.
+	containerName := "cldpd-test-unit-stopped"
+	// Run and let it exit immediately.
+	create := exec.Command("docker", "run", "--name", containerName, "alpine:latest", "true")
+	create.Stdout = io.Discard
+	create.Stderr = io.Discard
+	if err := create.Run(); err != nil {
+		t.Skipf("could not create stopped container: %v", err)
+	}
+	defer exec.Command("docker", "rm", "-f", containerName).Run() //nolint:errcheck
+
+	r := &DockerRunner{}
+	_, err := r.Exec(context.Background(), containerName, []string{"echo", "hi"}, io.Discard)
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("got %v, want ErrSessionNotFound", err)
+	}
+}
+
+func TestDockerRunner_Run_WithEnvAndWorkdir(t *testing.T) {
+	if !dockerAvailable() {
+		t.Skip("Docker not available")
+	}
+	var buf bytes.Buffer
+	r := &DockerRunner{}
 	opts := RunOptions{
-		Image:   "myimage:latest",
-		Name:    "cldpd-myrepo",
-		Cmd:     []string{"claude", "-p", "prompt"},
-		Env:     map[string]string{"KEY": "val"},
-		Workdir: "/workspace",
+		Image:   "alpine:latest",
+		Name:    "cldpd-test-unit-run-env",
+		Cmd:     []string{"sh", "-c", "echo $TESTVAR"},
+		Env:     map[string]string{"TESTVAR": "hello-env"},
+		Workdir: "/tmp",
 		Remove:  true,
 	}
-	if opts.Image != "myimage:latest" {
-		t.Errorf("Image: got %q", opts.Image)
+	code, err := r.Run(context.Background(), opts, &buf)
+	exec.Command("docker", "rm", "-f", "cldpd-test-unit-run-env").Run() //nolint:errcheck
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
 	}
-	if opts.Name != "cldpd-myrepo" {
-		t.Errorf("Name: got %q", opts.Name)
+	if code != 0 {
+		t.Errorf("exit code: got %d, want 0", code)
 	}
-	if len(opts.Cmd) != 3 {
-		t.Errorf("Cmd len: got %d, want 3", len(opts.Cmd))
-	}
-	if opts.Env["KEY"] != "val" {
-		t.Errorf("Env[KEY]: got %q", opts.Env["KEY"])
-	}
-	if opts.Workdir != "/workspace" {
-		t.Errorf("Workdir: got %q", opts.Workdir)
-	}
-	if !opts.Remove {
-		t.Error("Remove: got false, want true")
+	output := buf.String()
+	if output == "" {
+		t.Error("expected output from env var, got empty")
 	}
 }

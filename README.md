@@ -61,8 +61,9 @@ WORKDIR /workspace
 
 ### 3. Add configuration (optional)
 
+`~/.cldpd/pods/myrepo/pod.json`:
+
 ```json
-// ~/.cldpd/pods/myrepo/pod.json
 {
   "env": {
     "ANTHROPIC_API_KEY": "sk-ant-..."
@@ -183,9 +184,11 @@ The `Runner` interface abstracts Docker operations, allowing you to swap impleme
 
 - [Overview](docs/1.learn/1.overview.md) — What cldpd does and why
 - [Quickstart](docs/1.learn/2.quickstart.md) — From zero to dispatching
-- [Architecture](docs/1.learn/3.architecture.md) — Component design and data flow
-- [Reference](docs/2.reference/1.api.md) — Complete API documentation
-- [Types](docs/2.reference/2.types.md) — Type definitions and configuration schema
+- [Concepts](docs/1.learn/3.concepts.md) — Core abstractions and mental models
+- [Architecture](docs/1.learn/4.architecture.md) — Component design and data flow
+- [Guides](docs/2.guides/1.testing.md) — Testing, troubleshooting, and how-to
+- [Reference](docs/3.reference/1.api.md) — Complete API documentation
+- [Types](docs/3.reference/2.types.md) — Type definitions and configuration schema
 
 ## Contributing
 

@@ -32,6 +32,9 @@ func main() {
 		os.Exit(runStart(ctx, os.Args[2:]))
 	case "resume":
 		os.Exit(runResume(ctx, os.Args[2:]))
+	case "help", "--help":
+		printUsage()
+		os.Exit(0)
 	default:
 		fmt.Fprintf(os.Stderr, "cldpd: unknown subcommand %q\n\n", os.Args[1])
 		usageAndExit()
@@ -107,9 +110,13 @@ func runResume(ctx context.Context, args []string) int {
 	return code
 }
 
-func usageAndExit() {
+func printUsage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintln(os.Stderr, "  cldpd start <pod> --issue <url>")
 	fmt.Fprintln(os.Stderr, "  cldpd resume <pod> --prompt <text>")
+}
+
+func usageAndExit() {
+	printUsage()
 	os.Exit(1)
 }
