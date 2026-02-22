@@ -43,6 +43,10 @@ func DefaultPodsDir() (string, error) {
 // representing the running container. The image build completes before Start
 // returns — if the build fails, Start returns an error and no Session is created.
 //
+// If the pod's template.md is non-empty, its contents are prepended to the
+// prompt passed to Claude Code: template + "\n\n" + "Work on this GitHub issue: " + issueURL.
+// When template.md is absent, the prompt is the issue URL directive alone.
+//
 // The Session emits events in the following order:
 //
 //	BuildStarted → BuildComplete → ContainerStarted → Output* → ContainerExited
@@ -100,6 +104,9 @@ func (d *Dispatcher) Start(ctx context.Context, podName string, issueURL string)
 	}
 
 	prompt := "Work on this GitHub issue: " + issueURL
+	if pod.Template != "" {
+		prompt = pod.Template + "\n\n" + prompt
+	}
 
 	opts := RunOptions{
 		Image:   tag,

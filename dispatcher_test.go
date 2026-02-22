@@ -656,3 +656,111 @@ func TestDispatcher_Resume_OutputEvents(t *testing.T) {
 		t.Errorf("output: got %q, want %q", outputEvents[0].Data, "resume output line")
 	}
 }
+
+// makeTestPodWithTemplate creates a pod directory with a Dockerfile and a template.md.
+func makeTestPodWithTemplate(t *testing.T, podsDir, name, templateContent string) {
+	t.Helper()
+	makeTestPod(t, podsDir, name)
+	dir := filepath.Join(podsDir, name)
+	if err := os.WriteFile(filepath.Join(dir, "template.md"), []byte(templateContent), 0644); err != nil {
+		t.Fatalf("write template.md: %v", err)
+	}
+}
+
+func TestDispatcher_Start_Prompt_WithTemplate(t *testing.T) {
+	podsDir := t.TempDir()
+	makeTestPodWithTemplate(t, podsDir, "myrepo", "# Standing Orders\n\nEnsure origin is up to date.")
+
+	var capturedCmd []string
+	r := &mockRunner{
+		runFn: func(_ context.Context, opts RunOptions, _ io.Writer) (int, error) {
+			capturedCmd = opts.Cmd
+			return 0, nil
+		},
+	}
+	d := NewDispatcher(podsDir, r)
+
+	issueURL := "https://github.com/org/repo/issues/99"
+	s, err := d.Start(context.Background(), "myrepo", issueURL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	drainSession(t, s, 2*time.Second)
+
+	if len(capturedCmd) < 3 {
+		t.Fatalf("Cmd too short: %v", capturedCmd)
+	}
+	// The prompt is the last element of the claude -p <prompt> command.
+	prompt := capturedCmd[len(capturedCmd)-1]
+	wantPrefix := "# Standing Orders\n\nEnsure origin is up to date."
+	wantSuffix := "Work on this GitHub issue: " + issueURL
+	if !strings.HasPrefix(prompt, wantPrefix) {
+		t.Errorf("prompt does not start with template:\ngot:  %q\nwant prefix: %q", prompt, wantPrefix)
+	}
+	if !strings.HasSuffix(prompt, wantSuffix) {
+		t.Errorf("prompt does not end with base prompt:\ngot:  %q\nwant suffix: %q", prompt, wantSuffix)
+	}
+	wantFull := wantPrefix + "\n\n" + wantSuffix
+	if prompt != wantFull {
+		t.Errorf("prompt:\ngot:  %q\nwant: %q", prompt, wantFull)
+	}
+}
+
+func TestDispatcher_Start_Prompt_WithoutTemplate(t *testing.T) {
+	podsDir := t.TempDir()
+	makeTestPod(t, podsDir, "myrepo")
+
+	var capturedCmd []string
+	r := &mockRunner{
+		runFn: func(_ context.Context, opts RunOptions, _ io.Writer) (int, error) {
+			capturedCmd = opts.Cmd
+			return 0, nil
+		},
+	}
+	d := NewDispatcher(podsDir, r)
+
+	issueURL := "https://github.com/org/repo/issues/7"
+	s, err := d.Start(context.Background(), "myrepo", issueURL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	drainSession(t, s, 2*time.Second)
+
+	if len(capturedCmd) < 3 {
+		t.Fatalf("Cmd too short: %v", capturedCmd)
+	}
+	prompt := capturedCmd[len(capturedCmd)-1]
+	want := "Work on this GitHub issue: " + issueURL
+	if prompt != want {
+		t.Errorf("prompt:\ngot:  %q\nwant: %q", prompt, want)
+	}
+}
+
+func TestDispatcher_Resume_Prompt_NoTemplateUsed(t *testing.T) {
+	// Resume passes the caller's prompt directly; no template is applied.
+	podsDir := t.TempDir()
+
+	var capturedCmd []string
+	r := &mockRunner{
+		execFn: func(_ context.Context, _ string, cmd []string, _ io.Writer) (int, error) {
+			capturedCmd = cmd
+			return 0, nil
+		},
+	}
+	d := NewDispatcher(podsDir, r)
+
+	s, err := d.Resume(context.Background(), "myrepo", "continue where you left off")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	drainSession(t, s, 2*time.Second)
+
+	if len(capturedCmd) < 4 {
+		t.Fatalf("cmd too short: %v", capturedCmd)
+	}
+	prompt := capturedCmd[len(capturedCmd)-1]
+	want := "continue where you left off"
+	if prompt != want {
+		t.Errorf("resume prompt:\ngot:  %q\nwant: %q", prompt, want)
+	}
+}

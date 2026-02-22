@@ -30,6 +30,14 @@ func writePodJSON(t *testing.T, dir, content string) {
 	}
 }
 
+// writeTemplate writes a template.md file into the given pod directory.
+func writeTemplate(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "template.md"), []byte(content), 0644); err != nil {
+		t.Fatalf("write template.md: %v", err)
+	}
+}
+
 func TestDiscoverPod_NotFound(t *testing.T) {
 	podsDir := t.TempDir()
 	_, err := DiscoverPod(podsDir, "ghost")
@@ -376,5 +384,164 @@ func TestDiscoverPod_NoPodJSON_InheritEnvAndMountsNil(t *testing.T) {
 	}
 	if pod.Config.Mounts != nil {
 		t.Errorf("Mounts: got %v, want nil (no pod.json)", pod.Config.Mounts)
+	}
+}
+
+func TestDiscoverPod_Template_Absent(t *testing.T) {
+	podsDir := t.TempDir()
+	makePodDir(t, podsDir, "mypod")
+
+	pod, err := DiscoverPod(podsDir, "mypod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pod.Template != "" {
+		t.Errorf("Template: got %q, want empty string", pod.Template)
+	}
+}
+
+func TestDiscoverPod_Template_Present(t *testing.T) {
+	podsDir := t.TempDir()
+	dir := makePodDir(t, podsDir, "mypod")
+	writeTemplate(t, dir, "# Team Lead Instructions\n\nEnsure origin is up to date.\n")
+
+	pod, err := DiscoverPod(podsDir, "mypod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "# Team Lead Instructions\n\nEnsure origin is up to date.\n"
+	if pod.Template != want {
+		t.Errorf("Template: got %q, want %q", pod.Template, want)
+	}
+}
+
+func TestDiscoverPod_Template_Empty(t *testing.T) {
+	podsDir := t.TempDir()
+	dir := makePodDir(t, podsDir, "mypod")
+	writeTemplate(t, dir, "")
+
+	pod, err := DiscoverPod(podsDir, "mypod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pod.Template != "" {
+		t.Errorf("Template: got %q, want empty string for empty file", pod.Template)
+	}
+}
+
+func TestDiscoverPod_Template_Unreadable(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root; permission checks do not apply")
+	}
+
+	podsDir := t.TempDir()
+	dir := makePodDir(t, podsDir, "mypod")
+	writeTemplate(t, dir, "some content")
+	if err := os.Chmod(filepath.Join(dir, "template.md"), 0000); err != nil {
+		t.Fatalf("chmod template.md: %v", err)
+	}
+	t.Cleanup(func() {
+		// Restore permissions so TempDir cleanup can remove the file.
+		_ = os.Chmod(filepath.Join(dir, "template.md"), 0644)
+	})
+
+	_, err := DiscoverPod(podsDir, "mypod")
+	if err == nil {
+		t.Fatal("expected error for unreadable template.md, got nil")
+	}
+}
+
+func TestDiscoverPod_Mount_TildeExpanded(t *testing.T) {
+	podsDir := t.TempDir()
+	dir := makePodDir(t, podsDir, "mypod")
+	writePodJSON(t, dir, `{"mounts": [{"source": "~/keys", "target": "/root/.ssh/id_ed25519", "readOnly": true}]}`)
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("get home dir: %v", err)
+	}
+
+	pod, err := DiscoverPod(podsDir, "mypod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := filepath.Join(home, "keys")
+	if pod.Config.Mounts[0].Source != want {
+		t.Errorf("Mount.Source: got %q, want %q", pod.Config.Mounts[0].Source, want)
+	}
+}
+
+func TestDiscoverPod_Mount_TildeAloneExpanded(t *testing.T) {
+	podsDir := t.TempDir()
+	dir := makePodDir(t, podsDir, "mypod")
+	writePodJSON(t, dir, `{"mounts": [{"source": "~", "target": "/root/home"}]}`)
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("get home dir: %v", err)
+	}
+
+	pod, err := DiscoverPod(podsDir, "mypod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pod.Config.Mounts[0].Source != home {
+		t.Errorf("Mount.Source: got %q, want %q", pod.Config.Mounts[0].Source, home)
+	}
+}
+
+func TestDiscoverPod_Mount_AbsolutePathUnchanged(t *testing.T) {
+	podsDir := t.TempDir()
+	dir := makePodDir(t, podsDir, "mypod")
+	writePodJSON(t, dir, `{"mounts": [{"source": "/absolute/path", "target": "/target"}]}`)
+
+	pod, err := DiscoverPod(podsDir, "mypod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pod.Config.Mounts[0].Source != "/absolute/path" {
+		t.Errorf("Mount.Source: got %q, want %q", pod.Config.Mounts[0].Source, "/absolute/path")
+	}
+}
+
+func TestDiscoverPod_Mount_NoTildeUnchanged(t *testing.T) {
+	podsDir := t.TempDir()
+	dir := makePodDir(t, podsDir, "mypod")
+	writePodJSON(t, dir, `{"mounts": [{"source": "relative/path", "target": "/target"}]}`)
+
+	pod, err := DiscoverPod(podsDir, "mypod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pod.Config.Mounts[0].Source != "relative/path" {
+		t.Errorf("Mount.Source: got %q, want %q", pod.Config.Mounts[0].Source, "relative/path")
+	}
+}
+
+func TestDiscoverAll_Template_IncludedForPodsWithTemplate(t *testing.T) {
+	podsDir := t.TempDir()
+	dir := makePodDir(t, podsDir, "podwithtemplate")
+	writeTemplate(t, dir, "standing orders")
+	makePodDir(t, podsDir, "podwithouttemplate")
+
+	pods, err := DiscoverAll(podsDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pods) != 2 {
+		t.Fatalf("got %d pods, want 2", len(pods))
+	}
+	// pods are sorted by name: "podwithouttemplate" < "podwithtemplate"
+	if pods[0].Name != "podwithouttemplate" {
+		t.Errorf("pods[0].Name: got %q, want %q", pods[0].Name, "podwithouttemplate")
+	}
+	if pods[0].Template != "" {
+		t.Errorf("pods[0].Template: got %q, want empty", pods[0].Template)
+	}
+	if pods[1].Name != "podwithtemplate" {
+		t.Errorf("pods[1].Name: got %q, want %q", pods[1].Name, "podwithtemplate")
+	}
+	if pods[1].Template != "standing orders" {
+		t.Errorf("pods[1].Template: got %q, want %q", pods[1].Template, "standing orders")
 	}
 }
