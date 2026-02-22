@@ -9,91 +9,188 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/zoobzio/cldpd)](go.mod)
 [![Release](https://img.shields.io/github/v/release/zoobzio/cldpd)](https://github.com/zoobzio/cldpd/releases)
 
-Template repository for standing up Go library infrastructure matching the zoobzio ecosystem. Clone it, rename it, start building.
+Pod dispatcher for Claude Code agent teams.
 
-## What's Included
+Spawn Docker containers that run Claude Code against your repositories. Each repo carries its own agent workflows, standing orders, and skills. cldpd dispatches work to these self-sufficient teams and streams their output back to your terminal.
 
+## How It Works
+
+Define a pod — a directory with a Dockerfile and optional configuration. Point it at a GitHub issue. Walk away.
+
+```bash
+cldpd start myrepo --issue https://github.com/org/repo/issues/42
 ```
-your-new-package/
-├── go.mod                    # Go 1.24+ with toolchain
-├── Makefile                  # test, lint, coverage, ci targets
-├── .golangci.yml             # v2 config with security linters
-├── .codecov.yml              # 70% project / 80% patch targets
-├── .goreleaser.yml           # Library release automation
-├── .github/workflows/
-│   ├── ci.yml                # Test matrix, lint, security, benchmarks
-│   ├── coverage.yml          # Codecov integration
-│   ├── release.yml           # Tag-triggered releases
-│   └── codeql.yml            # Weekly security analysis
-├── testing/
-│   ├── helpers.go            # Reusable test utilities
-│   ├── integration/          # Integration test structure
-│   └── benchmarks/           # Benchmark structure
-├── LICENSE                   # MIT
-├── CONTRIBUTING.md           # Development workflow
-└── SECURITY.md               # Vulnerability reporting
+
+cldpd builds the Docker image, starts a container running Claude Code headlessly, and streams the team leader's narration back to your terminal. The crew inside the container works the issue autonomously. When the task is complete, the container exits and cleans up.
+
+Need to send follow-up guidance while the team is working? Open a second terminal:
+
+```bash
+cldpd resume myrepo --prompt "Focus on the error handling in api.go"
 ```
 
 ## Install
 
-This is a GitHub template repository. Click **Use this template** on GitHub, or:
-
 ```bash
-gh repo create your-package --template zoobzio/cldpd --clone
-cd your-package
+go install github.com/zoobzio/cldpd/cmd/cldpd@latest
 ```
 
-Then update `go.mod`, `Makefile`, and `.goreleaser.yml` with your package name.
+Requires Go 1.24+ and Docker.
 
 ## Quick Start
 
-After creating your repository from the template:
+### 1. Create a pod
 
 ```bash
-# Update module path
-sed -i 's/cldpd/your-package/g' go.mod Makefile .goreleaser.yml
-
-# Install development tools
-make install-tools
-
-# Verify everything works
-make check
-
-# Start building
+mkdir -p ~/.cldpd/pods/myrepo
 ```
 
-## Capabilities
+### 2. Write a Dockerfile
 
-| Feature | Description | Configuration |
-|---------|-------------|---------------|
-| Multi-version testing | Go 1.24 and 1.25 matrix | `.github/workflows/ci.yml` |
-| Linting | golangci-lint v2 with security focus | `.golangci.yml` |
-| Coverage tracking | Codecov with PR comments | `.codecov.yml` |
-| Release automation | GoReleaser for library packages | `.goreleaser.yml` |
-| Security scanning | gosec + CodeQL | `.github/workflows/codeql.yml` |
-| Benchmarks | Structured benchmark directory | `testing/benchmarks/` |
+```dockerfile
+# ~/.cldpd/pods/myrepo/Dockerfile
+FROM node:20
 
-## Why Samoa?
+# Install Claude Code
+RUN npm install -g @anthropic-ai/claude-code
 
-- **Immediate CI**: Push and your workflows run—no setup required
-- **Consistent tooling**: Every zoobzio package uses the same linter config, coverage targets, and release process
-- **Security by default**: gosec, CodeQL, and security-focused linters enabled from day one
-- **Test infrastructure ready**: Helpers, integration tests, and benchmarks structured and waiting
+# Clone your repository
+RUN git clone https://github.com/org/repo.git /workspace
+WORKDIR /workspace
+```
 
-## The Zoobzio Ecosystem
+### 3. Add configuration (optional)
 
-All zoobzio Go libraries use cldpd as their foundation. When standards evolve, updates propagate from here.
+```json
+// ~/.cldpd/pods/myrepo/pod.json
+{
+  "env": {
+    "ANTHROPIC_API_KEY": "sk-ant-..."
+  },
+  "workdir": "/workspace"
+}
+```
+
+### 4. Dispatch
+
+```bash
+cldpd start myrepo --issue https://github.com/org/repo/issues/42
+```
+
+The team leader's output streams to your terminal. The container exits when the task is complete.
+
+## Pod Structure
+
+Pods live at `~/.cldpd/pods/<name>/`. Each pod directory contains:
+
+| File | Required | Description |
+|------|----------|-------------|
+| `Dockerfile` | Yes | Defines the container environment |
+| `pod.json` | No | Optional configuration |
+
+The pod name is the directory name. cldpd does not generate or modify Dockerfiles — what goes inside the container is your concern.
+
+### pod.json
+
+All fields are optional:
+
+```json
+{
+  "image": "custom-image:v1",
+  "env": {"KEY": "value"},
+  "buildArgs": {"ARG": "value"},
+  "workdir": "/workspace"
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `image` | `cldpd-<podname>` | Docker image tag override |
+| `env` | none | Environment variables passed to the container |
+| `buildArgs` | none | Docker build arguments (`--build-arg`) |
+| `workdir` | none | Working directory inside the container |
+
+## CLI Reference
+
+### start
+
+Build and run a pod, streaming output until the container exits.
+
+```
+cldpd start <pod> --issue <url>
+```
+
+- Builds the Docker image from the pod's Dockerfile
+- Starts the container with `claude -p "Work on this GitHub issue: <url>"`
+- Streams container stdout to your terminal
+- Exits with the container's exit code
+
+### resume
+
+Send a follow-up prompt to a running pod.
+
+```
+cldpd resume <pod> --prompt <text>
+```
+
+- Execs into the running container named `cldpd-<pod>`
+- Runs `claude --resume -p "<text>"`
+- Streams output to your terminal
+- Fails with a clear error if the container is not running
+
+## Library Usage
+
+cldpd is also a Go library. The CLI is a thin wrapper around the `Dispatcher`:
+
+```go
+package main
+
+import (
+    "context"
+    "os"
+
+    "github.com/zoobzio/cldpd"
+)
+
+func main() {
+    runner := &cldpd.DockerRunner{}
+    d := cldpd.NewDispatcher("/home/user/.cldpd/pods", runner)
+
+    code, err := d.Start(
+        context.Background(),
+        "myrepo",
+        "https://github.com/org/repo/issues/42",
+        os.Stdout,
+    )
+    if err != nil {
+        // handle error
+    }
+    os.Exit(code)
+}
+```
+
+The `Runner` interface abstracts Docker operations, allowing you to swap implementations or mock for testing.
+
+## Design
+
+- **Stdlib only** — Zero external dependencies. Docker interaction via `os/exec`.
+- **Ephemeral** — Containers use `--rm`. No state persists between runs.
+- **Pass-through** — cldpd relays output, it does not parse or interpret it.
+- **Composable** — The `Runner` interface decouples Docker operations from orchestration.
+- **Blocking** — The CLI blocks for the duration of the run. No daemon, no background processes.
 
 ## Documentation
 
-- **Learn**: Review the configuration files directly—they're documented inline
-- **Guides**: See `CONTRIBUTING.md` for development workflow
-- **Reference**: Run `make help` for available commands
+- [Overview](docs/1.learn/1.overview.md) — What cldpd does and why
+- [Quickstart](docs/1.learn/2.quickstart.md) — From zero to dispatching
+- [Architecture](docs/1.learn/3.architecture.md) — Component design and data flow
+- [Reference](docs/2.reference/1.api.md) — Complete API documentation
+- [Types](docs/2.reference/2.types.md) — Type definitions and configuration schema
 
 ## Contributing
 
-Development workflow and conventions are documented in [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. Run `make help` for available commands.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE)
+MIT License — see [LICENSE](LICENSE) for details.
