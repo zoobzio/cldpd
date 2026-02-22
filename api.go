@@ -35,9 +35,14 @@
 //
 // # Pod definitions
 //
-// Pods are directories under ~/.cldpd/pods/<name>/ containing a Dockerfile
-// and an optional pod.json configuration file. See PodConfig for available
-// configuration fields including credential passthrough (InheritEnv, Mounts).
+// Pods are directories under ~/.cldpd/pods/<name>/ containing:
+//   - Dockerfile (required) — the container image definition
+//   - pod.json (optional) — configuration: env, mounts, image tag, etc.
+//   - template.md (optional) — standing orders prepended to the prompt on Start
+//
+// See PodConfig for available configuration fields including credential
+// passthrough (InheritEnv, Mounts). Mount source paths beginning with ~/
+// are expanded to the user's home directory.
 //
 // # Constraints
 //

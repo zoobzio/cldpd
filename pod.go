@@ -7,14 +7,17 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // Pod is a discovered pod definition. It holds the pod name, the absolute path
-// to its directory, the parsed configuration, and the absolute path to its Dockerfile.
+// to its directory, the parsed configuration, the absolute path to its Dockerfile,
+// and the optional template contents loaded from template.md.
 type Pod struct {
 	Name       string    // directory name, used as the pod identifier
 	Dir        string    // absolute path to the pod directory
 	Dockerfile string    // absolute path to the Dockerfile within Dir
+	Template   string    // contents of template.md; empty string if absent
 	Config     PodConfig // parsed from pod.json; zero-value if pod.json is absent
 }
 
@@ -34,6 +37,10 @@ type PodConfig struct {
 // ErrInvalidPod if the directory exists but contains no Dockerfile.
 // If pod.json is absent the pod is returned with a zero-value PodConfig.
 // If pod.json is present but malformed, an error is returned.
+// Mount source paths beginning with ~ or ~/ are expanded to the user's home
+// directory. ~user expansion is not supported.
+// If template.md is absent, Pod.Template is an empty string.
+// If template.md is present but cannot be read, an error is returned.
 func DiscoverPod(podsDir, name string) (Pod, error) {
 	dir := filepath.Join(podsDir, name)
 
@@ -61,6 +68,32 @@ func DiscoverPod(podsDir, name string) (Pod, error) {
 		if jsonErr := json.Unmarshal(data, &config); jsonErr != nil {
 			return Pod{}, fmt.Errorf("parse pod.json: %w", jsonErr)
 		}
+		// Expand ~ in mount source paths. Neither Go's os/exec nor Docker's -v
+		// flag performs shell expansion, so a literal ~ would silently fail to mount.
+		if len(config.Mounts) > 0 {
+			home, homeErr := os.UserHomeDir()
+			if homeErr != nil {
+				return Pod{}, fmt.Errorf("resolve home directory: %w", homeErr)
+			}
+			for i := range config.Mounts {
+				if config.Mounts[i].Source == "~" {
+					config.Mounts[i].Source = home
+				} else if strings.HasPrefix(config.Mounts[i].Source, "~/") {
+					config.Mounts[i].Source = filepath.Join(home, config.Mounts[i].Source[2:])
+				}
+			}
+		}
+	}
+
+	var template string
+	templatePath := filepath.Join(dir, "template.md")
+	//nolint:gosec // templatePath is constructed from a trusted pods directory, not user input
+	templateData, err := os.ReadFile(templatePath)
+	if err != nil && !os.IsNotExist(err) {
+		return Pod{}, fmt.Errorf("read template.md: %w", err)
+	}
+	if len(templateData) > 0 {
+		template = string(templateData)
 	}
 
 	absDir, err := filepath.Abs(dir)
@@ -73,6 +106,7 @@ func DiscoverPod(podsDir, name string) (Pod, error) {
 		Dir:        absDir,
 		Config:     config,
 		Dockerfile: filepath.Join(absDir, "Dockerfile"),
+		Template:   template,
 	}, nil
 }
 

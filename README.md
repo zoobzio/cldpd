@@ -88,8 +88,15 @@ Pods live at `~/.cldpd/pods/<name>/`. Each pod directory contains:
 |------|----------|-------------|
 | `Dockerfile` | Yes | Defines the container environment |
 | `pod.json` | No | Optional configuration |
+| `template.md` | No | Standing orders prepended to the prompt on start |
 
 The pod name is the directory name. cldpd does not generate or modify Dockerfiles — what goes inside the container is your concern.
+
+### template.md
+
+If `template.md` is present in the pod directory, its contents are prepended to the prompt when `cldpd start` is invoked. This is where team-specific standing orders go — git setup, branch workflow, operational strategy. The template is not used during `resume` (the agent already has its instructions from the initial session).
+
+If the file is absent, the prompt is unchanged. If the file is present but unreadable, pod discovery returns an error.
 
 ### pod.json
 
@@ -115,7 +122,7 @@ All fields are optional:
 | `buildArgs` | none | Docker build arguments (`--build-arg`) |
 | `workdir` | none | Working directory inside the container |
 | `inheritEnv` | none | Host environment variable names to forward to the container |
-| `mounts` | none | Bind mounts (`-v source:target[:ro]`) |
+| `mounts` | none | Bind mounts (`-v source:target[:ro]`). Source paths starting with `~` are expanded to the user's home directory. |
 
 ## CLI Reference
 
@@ -129,7 +136,7 @@ cldpd start <pod> --issue <url>
 
 - Builds the Docker image from the pod's Dockerfile
 - Starts a container with a unique session ID (`<pod>-<hex8>`)
-- Runs `claude -p "Work on this GitHub issue: <url>"` inside the container
+- Runs `claude -p "<prompt>"` inside the container (if `template.md` exists, its contents are prepended to the prompt)
 - Streams output events to your terminal, errors to stderr
 - Handles Ctrl+C gracefully (SIGTERM with 10-second timeout)
 - Exits with the container's exit code
@@ -202,6 +209,15 @@ func main() {
 - **Ephemeral** — Containers use `--rm`. No state persists between runs.
 - **Composable** — The `Runner` interface decouples Docker operations from orchestration.
 - **Stateless dispatcher** — The `Dispatcher` does not track sessions. The caller owns the `*Session` handle.
+
+## Examples
+
+The `examples/` directory contains complete pod definitions for two teams:
+
+- `examples/red-team/` — Dockerfile, pod.json, and template.md for a red team deployment
+- `examples/blue-team/` — Dockerfile, pod.json, and template.md for a blue team deployment
+
+Each demonstrates SSH key mounting, API key passthrough via `inheritEnv`, git identity configuration, and team-specific standing orders. Copy an example to `~/.cldpd/pods/` and adjust the paths and identity to match your setup.
 
 ## Documentation
 
