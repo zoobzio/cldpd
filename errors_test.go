@@ -16,6 +16,7 @@ func TestSentinelErrors_NonNil(t *testing.T) {
 		ErrContainerFailed,
 		ErrSessionNotFound,
 		ErrDockerUnavailable,
+		ErrStopFailed,
 	}
 	for _, err := range sentinels {
 		if err == nil {
@@ -35,6 +36,7 @@ func TestSentinelErrors_Messages(t *testing.T) {
 		{ErrContainerFailed, "container exited with error"},
 		{ErrSessionNotFound, "no running session for pod"},
 		{ErrDockerUnavailable, "docker is not available"},
+		{ErrStopFailed, "container stop failed"},
 	}
 	for _, tc := range cases {
 		if tc.err.Error() != tc.want {
@@ -51,6 +53,7 @@ func TestSentinelErrors_Distinct(t *testing.T) {
 		ErrContainerFailed,
 		ErrSessionNotFound,
 		ErrDockerUnavailable,
+		ErrStopFailed,
 	}
 	for i, a := range sentinels {
 		for j, b := range sentinels {
@@ -69,6 +72,7 @@ func TestSentinelErrors_WrappedIs(t *testing.T) {
 		ErrContainerFailed,
 		ErrSessionNotFound,
 		ErrDockerUnavailable,
+		ErrStopFailed,
 	}
 	for _, sentinel := range cases {
 		wrapped := fmt.Errorf("some context: %w", sentinel)

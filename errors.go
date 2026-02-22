@@ -19,3 +19,6 @@ var ErrSessionNotFound = errors.New("no running session for pod")
 
 // ErrDockerUnavailable is returned when the Docker daemon cannot be reached.
 var ErrDockerUnavailable = errors.New("docker is not available")
+
+// ErrStopFailed is returned when docker stop exits with a non-zero status.
+var ErrStopFailed = errors.New("container stop failed")

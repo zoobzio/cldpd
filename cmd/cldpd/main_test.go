@@ -5,12 +5,67 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/zoobzio/cldpd"
 )
+
+// testRunner implements cldpd.Runner for use in CLI tests.
+type testRunner struct {
+	buildFn func(ctx context.Context, tag string, dir string, buildArgs map[string]string) error
+	runFn   func(ctx context.Context, opts cldpd.RunOptions, stdout io.Writer) (int, error)
+	execFn  func(ctx context.Context, container string, cmd []string, stdout io.Writer) (int, error)
+	stopFn  func(ctx context.Context, container string, timeout time.Duration) error
+}
+
+func (r *testRunner) Build(ctx context.Context, tag string, dir string, buildArgs map[string]string) error {
+	if r.buildFn != nil {
+		return r.buildFn(ctx, tag, dir, buildArgs)
+	}
+	return nil
+}
+
+func (r *testRunner) Run(ctx context.Context, opts cldpd.RunOptions, stdout io.Writer) (int, error) {
+	if r.runFn != nil {
+		return r.runFn(ctx, opts, stdout)
+	}
+	return 0, nil
+}
+
+func (r *testRunner) Exec(ctx context.Context, container string, cmd []string, stdout io.Writer) (int, error) {
+	if r.execFn != nil {
+		return r.execFn(ctx, container, cmd, stdout)
+	}
+	return 0, nil
+}
+
+func (r *testRunner) Stop(ctx context.Context, container string, timeout time.Duration) error {
+	if r.stopFn != nil {
+		return r.stopFn(ctx, container, timeout)
+	}
+	return nil
+}
+
+// makeSessionPod creates a minimal valid pod directory and returns a Dispatcher backed by runner.
+func makeSessionPod(t *testing.T, runner cldpd.Runner) (*cldpd.Dispatcher, string) {
+	t.Helper()
+	podsDir := t.TempDir()
+	dir := filepath.Join(podsDir, "testpod")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("create pod dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM scratch\n"), 0644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	return cldpd.NewDispatcher(podsDir, runner), "testpod"
+}
 
 // buildCLI compiles the cldpd binary into a temp dir and returns the path.
 // The binary is removed when the test ends.
@@ -238,5 +293,150 @@ func TestCLI_HelpFlag(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "Usage:") {
 		t.Errorf("stderr should contain usage, got: %q", stderr)
+	}
+}
+
+// consumeSession tests below construct real *cldpd.Session values via Dispatcher
+// backed by a testRunner, allowing in-process testing of the event loop.
+
+func TestConsumeSession_OutputToStdout(t *testing.T) {
+	r := &testRunner{
+		runFn: func(_ context.Context, _ cldpd.RunOptions, stdout io.Writer) (int, error) {
+			fmt.Fprintln(stdout, "output line one")
+			fmt.Fprintln(stdout, "output line two")
+			return 0, nil
+		},
+	}
+	d, pod := makeSessionPod(t, r)
+	session, err := d.Start(context.Background(), pod, "https://github.com/org/repo/issues/1")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Redirect stdout to capture consumeSession output.
+	pr, pw, _ := os.Pipe()
+	oldStdout := os.Stdout
+	os.Stdout = pw
+
+	code := consumeSession(context.Background(), session)
+
+	pw.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	io.Copy(&buf, pr) //nolint:errcheck
+	pr.Close()
+
+	if code != 0 {
+		t.Errorf("exit code: got %d, want 0", code)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "output line one") {
+		t.Errorf("stdout missing 'output line one': %q", out)
+	}
+	if !strings.Contains(out, "output line two") {
+		t.Errorf("stdout missing 'output line two': %q", out)
+	}
+}
+
+func TestConsumeSession_ErrorToStderr(t *testing.T) {
+	runErr := fmt.Errorf("container process error")
+	r := &testRunner{
+		runFn: func(_ context.Context, _ cldpd.RunOptions, _ io.Writer) (int, error) {
+			return -1, runErr
+		},
+	}
+	d, pod := makeSessionPod(t, r)
+	session, err := d.Start(context.Background(), pod, "https://github.com/org/repo/issues/1")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Redirect stderr to capture error output.
+	pr, pw, _ := os.Pipe()
+	oldStderr := os.Stderr
+	os.Stderr = pw
+
+	consumeSession(context.Background(), session)
+
+	pw.Close()
+	os.Stderr = oldStderr
+
+	var buf bytes.Buffer
+	io.Copy(&buf, pr) //nolint:errcheck
+	pr.Close()
+
+	errOut := buf.String()
+	if !strings.Contains(errOut, "container process error") {
+		t.Errorf("stderr missing error message: %q", errOut)
+	}
+}
+
+func TestConsumeSession_ReturnsExitCode(t *testing.T) {
+	r := &testRunner{
+		runFn: func(_ context.Context, _ cldpd.RunOptions, _ io.Writer) (int, error) {
+			return 5, nil
+		},
+	}
+	d, pod := makeSessionPod(t, r)
+	session, err := d.Start(context.Background(), pod, "https://github.com/org/repo/issues/1")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Discard stderr to suppress any noise.
+	oldStderr := os.Stderr
+	os.Stderr, _ = os.Open(os.DevNull)
+	defer func() { os.Stderr = oldStderr }()
+
+	code := consumeSession(context.Background(), session)
+	if code != 5 {
+		t.Errorf("exit code: got %d, want 5", code)
+	}
+}
+
+func TestConsumeSession_InterruptCallsStop(t *testing.T) {
+	stopCalled := make(chan struct{})
+	unblock := make(chan struct{})
+
+	r := &testRunner{
+		runFn: func(_ context.Context, _ cldpd.RunOptions, _ io.Writer) (int, error) {
+			<-unblock
+			return 0, nil
+		},
+		stopFn: func(_ context.Context, _ string, _ time.Duration) error {
+			close(stopCalled)
+			close(unblock)
+			return nil
+		},
+	}
+	d, pod := makeSessionPod(t, r)
+	session, err := d.Start(context.Background(), pod, "https://github.com/org/repo/issues/1")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan int, 1)
+	go func() {
+		done <- consumeSession(ctx, session)
+	}()
+
+	// Cancel context to simulate interrupt.
+	cancel()
+
+	select {
+	case <-stopCalled:
+		// Stop was triggered by the interrupt goroutine.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop was not called within 2s after interrupt")
+	}
+
+	select {
+	case <-done:
+		// consumeSession returned.
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumeSession did not return within 2s after Stop")
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os/exec"
 	"testing"
+	"time"
 )
 
 // mockRunner is a test double for Runner.
@@ -16,6 +17,7 @@ type mockRunner struct {
 	buildFn func(ctx context.Context, tag string, dir string, buildArgs map[string]string) error
 	runFn   func(ctx context.Context, opts RunOptions, stdout io.Writer) (int, error)
 	execFn  func(ctx context.Context, container string, cmd []string, stdout io.Writer) (int, error)
+	stopFn  func(ctx context.Context, container string, timeout time.Duration) error
 }
 
 func (m *mockRunner) Build(ctx context.Context, tag string, dir string, buildArgs map[string]string) error {
@@ -37,6 +39,13 @@ func (m *mockRunner) Exec(ctx context.Context, container string, cmd []string, s
 		return m.execFn(ctx, container, cmd, stdout)
 	}
 	return 0, nil
+}
+
+func (m *mockRunner) Stop(ctx context.Context, container string, timeout time.Duration) error {
+	if m.stopFn != nil {
+		return m.stopFn(ctx, container, timeout)
+	}
+	return nil
 }
 
 // Compile-time interface assertions.
@@ -183,6 +192,160 @@ func TestRunCmdArgs_NoWorkdir(t *testing.T) {
 		if a == "-w" {
 			t.Errorf("-w should not be present when Workdir is empty, found at %d", i)
 		}
+	}
+}
+
+func TestRunCmdArgs_InheritEnv_BareFlag(t *testing.T) {
+	// A name in InheritEnv but not in Env should be emitted as bare -e NAME.
+	opts := RunOptions{
+		Image:      "img",
+		InheritEnv: []string{"HOME", "PATH"},
+	}
+	args := runCmdArgs(opts)
+
+	foundHome, foundPath := false, false
+	for i, a := range args {
+		if a == "-e" && i+1 < len(args) {
+			switch args[i+1] {
+			case "HOME":
+				foundHome = true
+			case "PATH":
+				foundPath = true
+			}
+		}
+	}
+	if !foundHome {
+		t.Errorf("args missing bare -e HOME: %v", args)
+	}
+	if !foundPath {
+		t.Errorf("args missing bare -e PATH: %v", args)
+	}
+}
+
+func TestRunCmdArgs_InheritEnv_SkipsDuplicates(t *testing.T) {
+	// A name present in both Env and InheritEnv must not be emitted twice.
+	opts := RunOptions{
+		Image:      "img",
+		Env:        map[string]string{"HOME": "/root"},
+		InheritEnv: []string{"HOME"},
+	}
+	args := runCmdArgs(opts)
+
+	count := 0
+	for i, a := range args {
+		if a == "-e" && i+1 < len(args) && args[i+1] == "HOME=/root" {
+			count++
+		}
+		if a == "-e" && i+1 < len(args) && args[i+1] == "HOME" {
+			t.Errorf("bare -e HOME emitted when HOME already in Env: %v", args)
+		}
+	}
+	if count != 1 {
+		t.Errorf("-e HOME=/root appears %d times, want exactly 1: %v", count, args)
+	}
+}
+
+func TestRunCmdArgs_Mounts_ReadWrite(t *testing.T) {
+	opts := RunOptions{
+		Image: "img",
+		Mounts: []Mount{
+			{Source: "/host/path", Target: "/container/path", ReadOnly: false},
+		},
+	}
+	args := runCmdArgs(opts)
+
+	found := false
+	for i, a := range args {
+		if a == "-v" && i+1 < len(args) && args[i+1] == "/host/path:/container/path" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("args missing -v /host/path:/container/path: %v", args)
+	}
+}
+
+func TestRunCmdArgs_Mounts_ReadOnly(t *testing.T) {
+	opts := RunOptions{
+		Image: "img",
+		Mounts: []Mount{
+			{Source: "/host/keys", Target: "/root/.ssh", ReadOnly: true},
+		},
+	}
+	args := runCmdArgs(opts)
+
+	found := false
+	for i, a := range args {
+		if a == "-v" && i+1 < len(args) && args[i+1] == "/host/keys:/root/.ssh:ro" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("args missing -v /host/keys:/root/.ssh:ro: %v", args)
+	}
+}
+
+func TestRunCmdArgs_Mounts_Multiple(t *testing.T) {
+	opts := RunOptions{
+		Image: "img",
+		Mounts: []Mount{
+			{Source: "/a", Target: "/b", ReadOnly: false},
+			{Source: "/c", Target: "/d", ReadOnly: true},
+		},
+	}
+	args := runCmdArgs(opts)
+
+	foundRW, foundRO := false, false
+	for i, a := range args {
+		if a == "-v" && i+1 < len(args) {
+			switch args[i+1] {
+			case "/a:/b":
+				foundRW = true
+			case "/c:/d:ro":
+				foundRO = true
+			}
+		}
+	}
+	if !foundRW {
+		t.Errorf("args missing -v /a:/b: %v", args)
+	}
+	if !foundRO {
+		t.Errorf("args missing -v /c:/d:ro: %v", args)
+	}
+}
+
+func TestRunCmdArgs_NoMounts(t *testing.T) {
+	opts := RunOptions{Image: "img"}
+	args := runCmdArgs(opts)
+	for i, a := range args {
+		if a == "-v" {
+			t.Errorf("-v should not be present when Mounts is empty, found at %d", i)
+		}
+	}
+}
+
+func TestRunCmdArgs_NoInheritEnv(t *testing.T) {
+	// With no InheritEnv, only Env entries appear.
+	opts := RunOptions{Image: "img", Env: map[string]string{"FOO": "bar"}}
+	args := runCmdArgs(opts)
+	// Check no bare -e NAME (without =) for FOO.
+	for i, a := range args {
+		if a == "-e" && i+1 < len(args) && args[i+1] == "FOO" {
+			t.Errorf("bare -e FOO should not appear when FOO is in Env: %v", args)
+		}
+	}
+}
+
+func TestMount_Struct(t *testing.T) {
+	m := Mount{Source: "/src", Target: "/tgt", ReadOnly: true}
+	if m.Source != "/src" {
+		t.Errorf("Source: got %q, want %q", m.Source, "/src")
+	}
+	if m.Target != "/tgt" {
+		t.Errorf("Target: got %q, want %q", m.Target, "/tgt")
+	}
+	if !m.ReadOnly {
+		t.Error("ReadOnly: got false, want true")
 	}
 }
 

@@ -21,23 +21,30 @@ import (
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+	code := run(ctx)
+	stop()
+	os.Exit(code)
+}
 
+// run dispatches the subcommand and returns the process exit code.
+func run(ctx context.Context) int {
 	if len(os.Args) < 2 {
-		usageAndExit()
+		printUsage()
+		return 1
 	}
 
 	switch os.Args[1] {
 	case "start":
-		os.Exit(runStart(ctx, os.Args[2:]))
+		return runStart(ctx, os.Args[2:])
 	case "resume":
-		os.Exit(runResume(ctx, os.Args[2:]))
+		return runResume(ctx, os.Args[2:])
 	case "help", "--help":
 		printUsage()
-		os.Exit(0)
+		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "cldpd: unknown subcommand %q\n\n", os.Args[1])
-		usageAndExit()
+		printUsage()
+		return 1
 	}
 }
 
@@ -71,11 +78,13 @@ func runStart(ctx context.Context, args []string) int {
 	}
 
 	d := cldpd.NewDispatcher(podsDir, runner)
-	code, err := d.Start(ctx, podName, *issue, os.Stdout)
+	session, err := d.Start(ctx, podName, *issue)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cldpd: %v\n", err)
+		return 1
 	}
-	return code
+
+	return consumeSession(ctx, session)
 }
 
 func runResume(ctx context.Context, args []string) int {
@@ -103,10 +112,35 @@ func runResume(ctx context.Context, args []string) int {
 
 	runner := &cldpd.DockerRunner{}
 	d := cldpd.NewDispatcher(podsDir, runner)
-	code, err := d.Resume(ctx, podName, *prompt, os.Stdout)
+	session, err := d.Resume(ctx, podName, *prompt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cldpd: %v\n", err)
+		return 1
 	}
+
+	return consumeSession(ctx, session)
+}
+
+// consumeSession ranges over session events, printing output to stdout and
+// errors to stderr. On interrupt (ctx cancellation), it calls session.Stop
+// for graceful shutdown. Returns the container's exit code.
+func consumeSession(ctx context.Context, session *cldpd.Session) int {
+	// Handle interrupt: stop the session gracefully.
+	go func() {
+		<-ctx.Done()
+		_ = session.Stop(context.Background())
+	}()
+
+	for event := range session.Events() {
+		switch event.Type {
+		case cldpd.EventOutput:
+			fmt.Println(event.Data)
+		case cldpd.EventError:
+			fmt.Fprintf(os.Stderr, "cldpd: %s\n", event.Data)
+		}
+	}
+
+	code, _ := session.Wait()
 	return code
 }
 
@@ -114,9 +148,4 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintln(os.Stderr, "  cldpd start <pod> --issue <url>")
 	fmt.Fprintln(os.Stderr, "  cldpd resume <pod> --prompt <text>")
-}
-
-func usageAndExit() {
-	printUsage()
-	os.Exit(1)
 }

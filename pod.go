@@ -14,17 +14,19 @@ import (
 type Pod struct {
 	Name       string    // directory name, used as the pod identifier
 	Dir        string    // absolute path to the pod directory
-	Config     PodConfig // parsed from pod.json; zero-value if pod.json is absent
 	Dockerfile string    // absolute path to the Dockerfile within Dir
+	Config     PodConfig // parsed from pod.json; zero-value if pod.json is absent
 }
 
 // PodConfig holds the optional configuration parsed from a pod's pod.json file.
-// All fields are optional; absent values use zero values (empty string, nil map).
+// All fields are optional; absent values use zero values (empty string, nil map, nil slice).
 type PodConfig struct {
-	Image     string            `json:"image"`     // Docker image tag; defaults to cldpd-<name> if empty
-	Env       map[string]string `json:"env"`       // environment variables passed to the container
-	BuildArgs map[string]string `json:"buildArgs"` // --build-arg values passed to docker build
-	Workdir   string            `json:"workdir"`   // working directory inside the container
+	Env        map[string]string `json:"env"`        // environment variables passed to the container
+	BuildArgs  map[string]string `json:"buildArgs"`  // --build-arg values passed to docker build
+	Image      string            `json:"image"`      // Docker image tag; defaults to cldpd-<name> if empty
+	Workdir    string            `json:"workdir"`    // working directory inside the container
+	InheritEnv []string          `json:"inheritEnv"` // host env var names to forward to the container
+	Mounts     []Mount           `json:"mounts"`     // bind mounts to pass to the container
 }
 
 // DiscoverPod loads a single pod by name from the given pods directory.
@@ -50,13 +52,14 @@ func DiscoverPod(podsDir, name string) (Pod, error) {
 
 	var config PodConfig
 	configPath := filepath.Join(dir, "pod.json")
+	//nolint:gosec // configPath is constructed from a trusted pods directory, not user input
 	data, err := os.ReadFile(configPath)
 	if err != nil && !os.IsNotExist(err) {
 		return Pod{}, fmt.Errorf("read pod.json: %w", err)
 	}
 	if len(data) > 0 {
-		if err := json.Unmarshal(data, &config); err != nil {
-			return Pod{}, fmt.Errorf("parse pod.json: %w", err)
+		if jsonErr := json.Unmarshal(data, &config); jsonErr != nil {
+			return Pod{}, fmt.Errorf("parse pod.json: %w", jsonErr)
 		}
 	}
 
@@ -82,7 +85,7 @@ func DiscoverAll(podsDir string) ([]Pod, error) {
 		return nil, fmt.Errorf("read pods directory: %w", err)
 	}
 
-	var pods []Pod
+	pods := make([]Pod, 0, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue

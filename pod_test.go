@@ -250,3 +250,131 @@ func TestDiscoverAll_InvalidPodsDir(t *testing.T) {
 		t.Fatal("expected error for invalid pods directory, got nil")
 	}
 }
+
+func TestDiscoverPod_InheritEnv(t *testing.T) {
+	podsDir := t.TempDir()
+	dir := makePodDir(t, podsDir, "mypod")
+	writePodJSON(t, dir, `{"inheritEnv": ["HOME", "PATH", "ANTHROPIC_API_KEY"]}`)
+
+	pod, err := DiscoverPod(podsDir, "mypod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pod.Config.InheritEnv) != 3 {
+		t.Fatalf("InheritEnv: got %d entries, want 3", len(pod.Config.InheritEnv))
+	}
+	want := []string{"HOME", "PATH", "ANTHROPIC_API_KEY"}
+	for i, name := range want {
+		if pod.Config.InheritEnv[i] != name {
+			t.Errorf("InheritEnv[%d]: got %q, want %q", i, pod.Config.InheritEnv[i], name)
+		}
+	}
+}
+
+func TestDiscoverPod_InheritEnv_Absent(t *testing.T) {
+	podsDir := t.TempDir()
+	makePodDir(t, podsDir, "mypod")
+
+	pod, err := DiscoverPod(podsDir, "mypod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pod.Config.InheritEnv != nil {
+		t.Errorf("InheritEnv: got %v, want nil", pod.Config.InheritEnv)
+	}
+}
+
+func TestDiscoverPod_Mounts_ReadWrite(t *testing.T) {
+	podsDir := t.TempDir()
+	dir := makePodDir(t, podsDir, "mypod")
+	writePodJSON(t, dir, `{"mounts": [{"source": "/host/path", "target": "/container/path"}]}`)
+
+	pod, err := DiscoverPod(podsDir, "mypod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pod.Config.Mounts) != 1 {
+		t.Fatalf("Mounts: got %d entries, want 1", len(pod.Config.Mounts))
+	}
+	m := pod.Config.Mounts[0]
+	if m.Source != "/host/path" {
+		t.Errorf("Mount.Source: got %q, want %q", m.Source, "/host/path")
+	}
+	if m.Target != "/container/path" {
+		t.Errorf("Mount.Target: got %q, want %q", m.Target, "/container/path")
+	}
+	if m.ReadOnly {
+		t.Error("Mount.ReadOnly: got true, want false")
+	}
+}
+
+func TestDiscoverPod_Mounts_ReadOnly(t *testing.T) {
+	podsDir := t.TempDir()
+	dir := makePodDir(t, podsDir, "mypod")
+	writePodJSON(t, dir, `{"mounts": [{"source": "/host/keys", "target": "/root/.ssh", "readOnly": true}]}`)
+
+	pod, err := DiscoverPod(podsDir, "mypod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pod.Config.Mounts) != 1 {
+		t.Fatalf("Mounts: got %d entries, want 1", len(pod.Config.Mounts))
+	}
+	if !pod.Config.Mounts[0].ReadOnly {
+		t.Error("Mount.ReadOnly: got false, want true")
+	}
+}
+
+func TestDiscoverPod_Mounts_Multiple(t *testing.T) {
+	podsDir := t.TempDir()
+	dir := makePodDir(t, podsDir, "mypod")
+	writePodJSON(t, dir, `{
+		"mounts": [
+			{"source": "/a", "target": "/b", "readOnly": false},
+			{"source": "/c", "target": "/d", "readOnly": true}
+		]
+	}`)
+
+	pod, err := DiscoverPod(podsDir, "mypod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pod.Config.Mounts) != 2 {
+		t.Fatalf("Mounts: got %d entries, want 2", len(pod.Config.Mounts))
+	}
+	if pod.Config.Mounts[0].Source != "/a" {
+		t.Errorf("Mounts[0].Source: got %q, want %q", pod.Config.Mounts[0].Source, "/a")
+	}
+	if pod.Config.Mounts[1].ReadOnly != true {
+		t.Error("Mounts[1].ReadOnly: got false, want true")
+	}
+}
+
+func TestDiscoverPod_Mounts_Absent(t *testing.T) {
+	podsDir := t.TempDir()
+	makePodDir(t, podsDir, "mypod")
+
+	pod, err := DiscoverPod(podsDir, "mypod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pod.Config.Mounts != nil {
+		t.Errorf("Mounts: got %v, want nil", pod.Config.Mounts)
+	}
+}
+
+func TestDiscoverPod_NoPodJSON_InheritEnvAndMountsNil(t *testing.T) {
+	podsDir := t.TempDir()
+	makePodDir(t, podsDir, "mypod")
+
+	pod, err := DiscoverPod(podsDir, "mypod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pod.Config.InheritEnv != nil {
+		t.Errorf("InheritEnv: got %v, want nil (no pod.json)", pod.Config.InheritEnv)
+	}
+	if pod.Config.Mounts != nil {
+		t.Errorf("Mounts: got %v, want nil (no pod.json)", pod.Config.Mounts)
+	}
+}

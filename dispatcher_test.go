@@ -3,18 +3,19 @@
 package cldpd
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
-// makeTestPod creates a minimal valid pod directory in podsDir and returns the dispatcher.
+// makeTestPod creates a minimal valid pod directory in podsDir.
 func makeTestPod(t *testing.T, podsDir, name string) {
 	t.Helper()
 	dir := filepath.Join(podsDir, name)
@@ -24,6 +25,15 @@ func makeTestPod(t *testing.T, podsDir, name string) {
 	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM scratch\n"), 0644); err != nil {
 		t.Fatalf("write Dockerfile: %v", err)
 	}
+}
+
+// drainSession drains a session's events and calls Wait, failing the test if
+// either does not complete within the timeout.
+func drainSession(t *testing.T, s *Session, timeout time.Duration) ([]Event, int, error) {
+	t.Helper()
+	events := collectEvents(t, s.Events(), timeout)
+	code, err := waitForDone(t, s, timeout)
+	return events, code, err
 }
 
 func TestContainerName(t *testing.T) {
@@ -72,12 +82,28 @@ func TestNewDispatcher(t *testing.T) {
 	}
 }
 
+func TestNewSessionID_Format(t *testing.T) {
+	re := regexp.MustCompile(`^myrepo-[0-9a-f]{8}$`)
+	id := newSessionID("myrepo")
+	if !re.MatchString(id) {
+		t.Errorf("newSessionID: got %q, want format myrepo-<8 hex chars>", id)
+	}
+}
+
+func TestNewSessionID_Unique(t *testing.T) {
+	id1 := newSessionID("pod")
+	id2 := newSessionID("pod")
+	if id1 == id2 {
+		t.Errorf("newSessionID: two calls returned same ID %q", id1)
+	}
+}
+
 func TestDispatcher_Start_PodNotFound(t *testing.T) {
 	podsDir := t.TempDir()
 	r := &mockRunner{}
 	d := NewDispatcher(podsDir, r)
 
-	_, err := d.Start(context.Background(), "ghost", "https://github.com/org/repo/issues/1", io.Discard)
+	_, err := d.Start(context.Background(), "ghost", "https://github.com/org/repo/issues/1")
 	if !errors.Is(err, ErrPodNotFound) {
 		t.Errorf("got %v, want ErrPodNotFound", err)
 	}
@@ -85,7 +111,6 @@ func TestDispatcher_Start_PodNotFound(t *testing.T) {
 
 func TestDispatcher_Start_InvalidPod(t *testing.T) {
 	podsDir := t.TempDir()
-	// Directory with no Dockerfile
 	dir := filepath.Join(podsDir, "nodocker")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatalf("create dir: %v", err)
@@ -94,7 +119,7 @@ func TestDispatcher_Start_InvalidPod(t *testing.T) {
 	r := &mockRunner{}
 	d := NewDispatcher(podsDir, r)
 
-	_, err := d.Start(context.Background(), "nodocker", "https://github.com/org/repo/issues/1", io.Discard)
+	_, err := d.Start(context.Background(), "nodocker", "https://github.com/org/repo/issues/1")
 	if !errors.Is(err, ErrInvalidPod) {
 		t.Errorf("got %v, want ErrInvalidPod", err)
 	}
@@ -113,7 +138,11 @@ func TestDispatcher_Start_DefaultImageTag(t *testing.T) {
 	}
 	d := NewDispatcher(podsDir, r)
 
-	_, _ = d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1", io.Discard)
+	s, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	drainSession(t, s, 2*time.Second)
 
 	if builtTag != "cldpd-myrepo" {
 		t.Errorf("image tag: got %q, want %q", builtTag, "cldpd-myrepo")
@@ -123,7 +152,6 @@ func TestDispatcher_Start_DefaultImageTag(t *testing.T) {
 func TestDispatcher_Start_CustomImageTag(t *testing.T) {
 	podsDir := t.TempDir()
 	makeTestPod(t, podsDir, "myrepo")
-	// Write pod.json with custom image
 	dir := filepath.Join(podsDir, "myrepo")
 	if err := os.WriteFile(filepath.Join(dir, "pod.json"), []byte(`{"image":"custom:v1"}`), 0644); err != nil {
 		t.Fatalf("write pod.json: %v", err)
@@ -138,7 +166,11 @@ func TestDispatcher_Start_CustomImageTag(t *testing.T) {
 	}
 	d := NewDispatcher(podsDir, r)
 
-	_, _ = d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1", io.Discard)
+	s, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	drainSession(t, s, 2*time.Second)
 
 	if builtTag != "custom:v1" {
 		t.Errorf("image tag: got %q, want %q", builtTag, "custom:v1")
@@ -156,13 +188,17 @@ func TestDispatcher_Start_BuildFailed(t *testing.T) {
 	}
 	d := NewDispatcher(podsDir, r)
 
-	_, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1", io.Discard)
+	s, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1")
 	if !errors.Is(err, ErrBuildFailed) {
 		t.Errorf("got %v, want ErrBuildFailed", err)
 	}
+	if s != nil {
+		t.Error("session should be nil on build failure")
+		drainSession(t, s, 2*time.Second)
+	}
 }
 
-func TestDispatcher_Start_RunOptions(t *testing.T) {
+func TestDispatcher_Start_RunOptions_Image(t *testing.T) {
 	podsDir := t.TempDir()
 	makeTestPod(t, podsDir, "myrepo")
 
@@ -176,14 +212,12 @@ func TestDispatcher_Start_RunOptions(t *testing.T) {
 	d := NewDispatcher(podsDir, r)
 
 	issueURL := "https://github.com/org/repo/issues/42"
-	_, err := d.Start(context.Background(), "myrepo", issueURL, io.Discard)
+	s, err := d.Start(context.Background(), "myrepo", issueURL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	drainSession(t, s, 2*time.Second)
 
-	if capturedOpts.Name != "cldpd-myrepo" {
-		t.Errorf("container name: got %q, want %q", capturedOpts.Name, "cldpd-myrepo")
-	}
 	if capturedOpts.Image != "cldpd-myrepo" {
 		t.Errorf("image: got %q, want %q", capturedOpts.Image, "cldpd-myrepo")
 	}
@@ -201,29 +235,114 @@ func TestDispatcher_Start_RunOptions(t *testing.T) {
 	}
 }
 
-func TestDispatcher_Start_StreamsOutput(t *testing.T) {
+func TestDispatcher_Start_ContainerName_IsSessionID(t *testing.T) {
+	// Container name is now the session ID, not cldpd-<podName>.
+	// Session ID format: <podName>-<hex8>.
 	podsDir := t.TempDir()
 	makeTestPod(t, podsDir, "myrepo")
 
+	var capturedName string
 	r := &mockRunner{
-		runFn: func(_ context.Context, _ RunOptions, stdout io.Writer) (int, error) {
-			_, _ = stdout.Write([]byte("container output"))
+		runFn: func(_ context.Context, opts RunOptions, _ io.Writer) (int, error) {
+			capturedName = opts.Name
 			return 0, nil
 		},
 	}
 	d := NewDispatcher(podsDir, r)
 
-	var buf bytes.Buffer
-	_, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1", &buf)
+	s, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if buf.String() != "container output" {
-		t.Errorf("output: got %q, want %q", buf.String(), "container output")
+	drainSession(t, s, 2*time.Second)
+
+	re := regexp.MustCompile(`^myrepo-[0-9a-f]{8}$`)
+	if !re.MatchString(capturedName) {
+		t.Errorf("container name: got %q, want format myrepo-<8 hex chars>", capturedName)
 	}
 }
 
-func TestDispatcher_Start_NonZeroExitReturnsErrContainerFailed(t *testing.T) {
+func TestDispatcher_Start_PreambleEvents(t *testing.T) {
+	podsDir := t.TempDir()
+	makeTestPod(t, podsDir, "myrepo")
+
+	r := &mockRunner{}
+	d := NewDispatcher(podsDir, r)
+
+	s, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	events := collectEvents(t, s.Events(), 2*time.Second)
+	waitForDone(t, s, 2*time.Second)
+
+	typeCount := make(map[EventType]int)
+	for _, e := range events {
+		typeCount[e.Type]++
+	}
+	if typeCount[EventBuildStarted] != 1 {
+		t.Errorf("EventBuildStarted: got %d, want 1", typeCount[EventBuildStarted])
+	}
+	if typeCount[EventBuildComplete] != 1 {
+		t.Errorf("EventBuildComplete: got %d, want 1", typeCount[EventBuildComplete])
+	}
+	if typeCount[EventContainerStarted] != 1 {
+		t.Errorf("EventContainerStarted: got %d, want 1", typeCount[EventContainerStarted])
+	}
+	if typeCount[EventContainerExited] != 1 {
+		t.Errorf("EventContainerExited: got %d, want 1", typeCount[EventContainerExited])
+	}
+	// BuildStarted must come before BuildComplete which must come before ContainerStarted.
+	var order []EventType
+	for _, e := range events {
+		order = append(order, e.Type)
+	}
+	if order[0] != EventBuildStarted {
+		t.Errorf("first event: got %d, want EventBuildStarted", order[0])
+	}
+	if order[1] != EventBuildComplete {
+		t.Errorf("second event: got %d, want EventBuildComplete", order[1])
+	}
+	if order[2] != EventContainerStarted {
+		t.Errorf("third event: got %d, want EventContainerStarted", order[2])
+	}
+}
+
+func TestDispatcher_Start_OutputEvents(t *testing.T) {
+	podsDir := t.TempDir()
+	makeTestPod(t, podsDir, "myrepo")
+
+	r := &mockRunner{
+		runFn: func(_ context.Context, _ RunOptions, stdout io.Writer) (int, error) {
+			fmt.Fprintln(stdout, "hello from container")
+			return 0, nil
+		},
+	}
+	d := NewDispatcher(podsDir, r)
+
+	s, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	events := collectEvents(t, s.Events(), 2*time.Second)
+	waitForDone(t, s, 2*time.Second)
+
+	var outputEvents []Event
+	for _, e := range events {
+		if e.Type == EventOutput {
+			outputEvents = append(outputEvents, e)
+		}
+	}
+	if len(outputEvents) != 1 {
+		t.Fatalf("output events: got %d, want 1", len(outputEvents))
+	}
+	if outputEvents[0].Data != "hello from container" {
+		t.Errorf("output data: got %q, want %q", outputEvents[0].Data, "hello from container")
+	}
+}
+
+func TestDispatcher_Start_NonZeroExit_ViaSession(t *testing.T) {
+	// Non-zero exit code is delivered through the session, not as a Start error.
 	podsDir := t.TempDir()
 	makeTestPod(t, podsDir, "myrepo")
 
@@ -234,28 +353,161 @@ func TestDispatcher_Start_NonZeroExitReturnsErrContainerFailed(t *testing.T) {
 	}
 	d := NewDispatcher(podsDir, r)
 
-	code, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1", io.Discard)
-	if !errors.Is(err, ErrContainerFailed) {
-		t.Errorf("got %v, want ErrContainerFailed", err)
+	s, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1")
+	if err != nil {
+		t.Fatalf("Start returned unexpected error: %v", err)
+	}
+
+	events, code, waitErr := drainSession(t, s, 2*time.Second)
+	if waitErr != nil {
+		t.Errorf("Wait error: got %v, want nil", waitErr)
 	}
 	if code != 2 {
 		t.Errorf("exit code: got %d, want 2", code)
 	}
+
+	var exitEvent *Event
+	for i := range events {
+		if events[i].Type == EventContainerExited {
+			exitEvent = &events[i]
+		}
+	}
+	if exitEvent == nil {
+		t.Fatal("no ContainerExited event")
+	}
+	if exitEvent.Code != 2 {
+		t.Errorf("ContainerExited.Code: got %d, want 2", exitEvent.Code)
+	}
 }
 
-func TestDispatcher_Start_SuccessReturnsZero(t *testing.T) {
+func TestDispatcher_Start_InheritEnv_MergedIntoRunOptions(t *testing.T) {
 	podsDir := t.TempDir()
 	makeTestPod(t, podsDir, "myrepo")
+	dir := filepath.Join(podsDir, "myrepo")
+	if err := os.WriteFile(filepath.Join(dir, "pod.json"),
+		[]byte(`{"inheritEnv": ["TEST_DISPATCH_VAR"]}`), 0644); err != nil {
+		t.Fatalf("write pod.json: %v", err)
+	}
 
-	r := &mockRunner{}
+	t.Setenv("TEST_DISPATCH_VAR", "dispatch-value")
+
+	var capturedOpts RunOptions
+	r := &mockRunner{
+		runFn: func(_ context.Context, opts RunOptions, _ io.Writer) (int, error) {
+			capturedOpts = opts
+			return 0, nil
+		},
+	}
 	d := NewDispatcher(podsDir, r)
 
-	code, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1", io.Discard)
+	s, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if code != 0 {
-		t.Errorf("exit code: got %d, want 0", code)
+	drainSession(t, s, 2*time.Second)
+
+	if capturedOpts.Env["TEST_DISPATCH_VAR"] != "dispatch-value" {
+		t.Errorf("InheritEnv: TEST_DISPATCH_VAR not merged into Env: %v", capturedOpts.Env)
+	}
+}
+
+func TestDispatcher_Start_InheritEnv_EmptyHostVar_NotMerged(t *testing.T) {
+	// If the host env var is empty/unset, it should not appear in Env.
+	podsDir := t.TempDir()
+	makeTestPod(t, podsDir, "myrepo")
+	dir := filepath.Join(podsDir, "myrepo")
+	if err := os.WriteFile(filepath.Join(dir, "pod.json"),
+		[]byte(`{"inheritEnv": ["DEFINITELY_NOT_SET_XYZ123"]}`), 0644); err != nil {
+		t.Fatalf("write pod.json: %v", err)
+	}
+	os.Unsetenv("DEFINITELY_NOT_SET_XYZ123")
+
+	var capturedOpts RunOptions
+	r := &mockRunner{
+		runFn: func(_ context.Context, opts RunOptions, _ io.Writer) (int, error) {
+			capturedOpts = opts
+			return 0, nil
+		},
+	}
+	d := NewDispatcher(podsDir, r)
+
+	s, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	drainSession(t, s, 2*time.Second)
+
+	if _, ok := capturedOpts.Env["DEFINITELY_NOT_SET_XYZ123"]; ok {
+		t.Error("unset InheritEnv var should not appear in RunOptions.Env")
+	}
+}
+
+func TestDispatcher_Start_Mounts_PassedThrough(t *testing.T) {
+	podsDir := t.TempDir()
+	makeTestPod(t, podsDir, "myrepo")
+	dir := filepath.Join(podsDir, "myrepo")
+	if err := os.WriteFile(filepath.Join(dir, "pod.json"),
+		[]byte(`{"mounts": [{"source": "/host/keys", "target": "/root/.ssh", "readOnly": true}]}`), 0644); err != nil {
+		t.Fatalf("write pod.json: %v", err)
+	}
+
+	var capturedOpts RunOptions
+	r := &mockRunner{
+		runFn: func(_ context.Context, opts RunOptions, _ io.Writer) (int, error) {
+			capturedOpts = opts
+			return 0, nil
+		},
+	}
+	d := NewDispatcher(podsDir, r)
+
+	s, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	drainSession(t, s, 2*time.Second)
+
+	if len(capturedOpts.Mounts) != 1 {
+		t.Fatalf("Mounts: got %d, want 1", len(capturedOpts.Mounts))
+	}
+	if capturedOpts.Mounts[0].Source != "/host/keys" {
+		t.Errorf("Mount.Source: got %q, want %q", capturedOpts.Mounts[0].Source, "/host/keys")
+	}
+	if !capturedOpts.Mounts[0].ReadOnly {
+		t.Error("Mount.ReadOnly: got false, want true")
+	}
+}
+
+func TestDispatcher_Start_ConcurrentCalls_UniqueContainerNames(t *testing.T) {
+	podsDir := t.TempDir()
+	makeTestPod(t, podsDir, "myrepo")
+
+	var names []string
+	r := &mockRunner{
+		runFn: func(_ context.Context, opts RunOptions, _ io.Writer) (int, error) {
+			names = append(names, opts.Name)
+			return 0, nil
+		},
+	}
+	d := NewDispatcher(podsDir, r)
+
+	// Start twice sequentially; names must differ.
+	s1, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1")
+	if err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	drainSession(t, s1, 2*time.Second)
+
+	s2, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1")
+	if err != nil {
+		t.Fatalf("second Start: %v", err)
+	}
+	drainSession(t, s2, 2*time.Second)
+
+	if len(names) != 2 {
+		t.Fatalf("expected 2 container names, got %d", len(names))
+	}
+	if names[0] == names[1] {
+		t.Errorf("two Start calls produced same container name: %q", names[0])
 	}
 }
 
@@ -271,10 +523,12 @@ func TestDispatcher_Resume_ContainerName(t *testing.T) {
 	}
 	d := NewDispatcher(podsDir, r)
 
-	_, err := d.Resume(context.Background(), "myrepo", "do more work", io.Discard)
+	s, err := d.Resume(context.Background(), "myrepo", "do more work")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	drainSession(t, s, 2*time.Second)
+
 	if execContainer != "cldpd-myrepo" {
 		t.Errorf("container: got %q, want %q", execContainer, "cldpd-myrepo")
 	}
@@ -292,10 +546,11 @@ func TestDispatcher_Resume_Command(t *testing.T) {
 	}
 	d := NewDispatcher(podsDir, r)
 
-	_, err := d.Resume(context.Background(), "myrepo", "do more work", io.Discard)
+	s, err := d.Resume(context.Background(), "myrepo", "do more work")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	drainSession(t, s, 2*time.Second)
 
 	want := []string{"claude", "--resume", "-p", "do more work"}
 	if len(execCmd) != len(want) {
@@ -308,7 +563,36 @@ func TestDispatcher_Resume_Command(t *testing.T) {
 	}
 }
 
-func TestDispatcher_Resume_SessionNotFound(t *testing.T) {
+func TestDispatcher_Resume_PreambleIsContainerStartedOnly(t *testing.T) {
+	podsDir := t.TempDir()
+
+	r := &mockRunner{}
+	d := NewDispatcher(podsDir, r)
+
+	s, err := d.Resume(context.Background(), "myrepo", "prompt")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	events := collectEvents(t, s.Events(), 2*time.Second)
+	waitForDone(t, s, 2*time.Second)
+
+	typeCount := make(map[EventType]int)
+	for _, e := range events {
+		typeCount[e.Type]++
+	}
+	if typeCount[EventBuildStarted] != 0 {
+		t.Errorf("EventBuildStarted: got %d, want 0 (Resume does not build)", typeCount[EventBuildStarted])
+	}
+	if typeCount[EventBuildComplete] != 0 {
+		t.Errorf("EventBuildComplete: got %d, want 0", typeCount[EventBuildComplete])
+	}
+	if typeCount[EventContainerStarted] != 1 {
+		t.Errorf("EventContainerStarted: got %d, want 1", typeCount[EventContainerStarted])
+	}
+}
+
+func TestDispatcher_Resume_ExecError_ViaSession(t *testing.T) {
+	// ErrSessionNotFound from runner.Exec comes through the session event stream.
 	podsDir := t.TempDir()
 
 	r := &mockRunner{
@@ -318,48 +602,57 @@ func TestDispatcher_Resume_SessionNotFound(t *testing.T) {
 	}
 	d := NewDispatcher(podsDir, r)
 
-	_, err := d.Resume(context.Background(), "ghost", "guidance", io.Discard)
-	if !errors.Is(err, ErrSessionNotFound) {
-		t.Errorf("got %v, want ErrSessionNotFound", err)
+	s, err := d.Resume(context.Background(), "ghost", "guidance")
+	if err != nil {
+		t.Fatalf("Resume returned unexpected error: %v", err)
+	}
+
+	events := collectEvents(t, s.Events(), 2*time.Second)
+	_, waitErr := waitForDone(t, s, 2*time.Second)
+
+	if !errors.Is(waitErr, ErrSessionNotFound) {
+		t.Errorf("Wait err: got %v, want ErrSessionNotFound", waitErr)
+	}
+
+	var errEvent *Event
+	for i := range events {
+		if events[i].Type == EventError {
+			errEvent = &events[i]
+		}
+	}
+	if errEvent == nil {
+		t.Error("no EventError in session stream for exec failure")
 	}
 }
 
-func TestDispatcher_Resume_StreamsOutput(t *testing.T) {
+func TestDispatcher_Resume_OutputEvents(t *testing.T) {
 	podsDir := t.TempDir()
 
 	r := &mockRunner{
 		execFn: func(_ context.Context, _ string, _ []string, stdout io.Writer) (int, error) {
-			_, _ = stdout.Write([]byte("resume output"))
+			fmt.Fprintln(stdout, "resume output line")
 			return 0, nil
 		},
 	}
 	d := NewDispatcher(podsDir, r)
 
-	var buf bytes.Buffer
-	_, err := d.Resume(context.Background(), "myrepo", "guidance", &buf)
+	s, err := d.Resume(context.Background(), "myrepo", "guidance")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if buf.String() != "resume output" {
-		t.Errorf("output: got %q, want %q", buf.String(), "resume output")
-	}
-}
+	events := collectEvents(t, s.Events(), 2*time.Second)
+	waitForDone(t, s, 2*time.Second)
 
-func TestDispatcher_Resume_ReturnsExitCode(t *testing.T) {
-	podsDir := t.TempDir()
-
-	r := &mockRunner{
-		execFn: func(_ context.Context, _ string, _ []string, _ io.Writer) (int, error) {
-			return 3, nil
-		},
+	var outputEvents []Event
+	for _, e := range events {
+		if e.Type == EventOutput {
+			outputEvents = append(outputEvents, e)
+		}
 	}
-	d := NewDispatcher(podsDir, r)
-
-	code, err := d.Resume(context.Background(), "myrepo", "guidance", io.Discard)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if len(outputEvents) != 1 {
+		t.Fatalf("output events: got %d, want 1", len(outputEvents))
 	}
-	if code != 3 {
-		t.Errorf("exit code: got %d, want 3", code)
+	if outputEvents[0].Data != "resume output line" {
+		t.Errorf("output: got %q, want %q", outputEvents[0].Data, "resume output line")
 	}
 }
