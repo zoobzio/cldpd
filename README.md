@@ -1,13 +1,13 @@
-# samoa
+# cldpd
 
-[![CI Status](https://github.com/zoobzio/samoa/workflows/CI/badge.svg)](https://github.com/zoobzio/samoa/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/zoobzio/samoa/graph/badge.svg?branch=main)](https://codecov.io/gh/zoobzio/samoa)
-[![Go Report Card](https://goreportcard.com/badge/github.com/zoobzio/samoa)](https://goreportcard.com/report/github.com/zoobzio/samoa)
-[![CodeQL](https://github.com/zoobzio/samoa/workflows/CodeQL/badge.svg)](https://github.com/zoobzio/samoa/security/code-scanning)
-[![Go Reference](https://pkg.go.dev/badge/github.com/zoobzio/samoa.svg)](https://pkg.go.dev/github.com/zoobzio/samoa)
-[![License](https://img.shields.io/github/license/zoobzio/samoa)](LICENSE)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/zoobzio/samoa)](go.mod)
-[![Release](https://img.shields.io/github/v/release/zoobzio/samoa)](https://github.com/zoobzio/samoa/releases)
+[![CI Status](https://github.com/zoobzio/cldpd/workflows/CI/badge.svg)](https://github.com/zoobzio/cldpd/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/zoobzio/cldpd/graph/badge.svg?branch=main)](https://codecov.io/gh/zoobzio/cldpd)
+[![Go Report Card](https://goreportcard.com/badge/github.com/zoobzio/cldpd)](https://goreportcard.com/report/github.com/zoobzio/cldpd)
+[![CodeQL](https://github.com/zoobzio/cldpd/workflows/CodeQL/badge.svg)](https://github.com/zoobzio/cldpd/security/code-scanning)
+[![Go Reference](https://pkg.go.dev/badge/github.com/zoobzio/cldpd.svg)](https://pkg.go.dev/github.com/zoobzio/cldpd)
+[![License](https://img.shields.io/github/license/zoobzio/cldpd)](LICENSE)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/zoobzio/cldpd)](go.mod)
+[![Release](https://img.shields.io/github/v/release/zoobzio/cldpd)](https://github.com/zoobzio/cldpd/releases)
 
 Template repository for standing up Go library infrastructure matching the zoobzio ecosystem. Clone it, rename it, start building.
 
@@ -39,7 +39,7 @@ your-new-package/
 This is a GitHub template repository. Click **Use this template** on GitHub, or:
 
 ```bash
-gh repo create your-package --template zoobzio/samoa --clone
+gh repo create your-package --template zoobzio/cldpd --clone
 cd your-package
 ```
 
@@ -51,7 +51,7 @@ After creating your repository from the template:
 
 ```bash
 # Update module path
-sed -i 's/samoa/your-package/g' go.mod Makefile .goreleaser.yml
+sed -i 's/cldpd/your-package/g' go.mod Makefile .goreleaser.yml
 
 # Install development tools
 make install-tools
@@ -82,7 +82,7 @@ make check
 
 ## The Zoobzio Ecosystem
 
-All zoobzio Go libraries use samoa as their foundation. When standards evolve, updates propagate from here.
+All zoobzio Go libraries use cldpd as their foundation. When standards evolve, updates propagate from here.
 
 ## Documentation
 

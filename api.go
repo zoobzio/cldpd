@@ -1,16 +1,7 @@
-// Package samoa provides template configurations for zoobzio packages.
+// Package cldpd dispatches Claude Code agent teams to Docker containers.
 //
-// This repository serves as the canonical template for all zoobzio Go libraries,
-// containing standardized configurations for:
-//
-//   - Go module setup (go.mod)
-//   - Linting (.golangci.yml)
-//   - Coverage (.codecov.yml)
-//   - Release automation (.goreleaser.yml)
-//   - CI/CD workflows (.github/workflows/)
-//   - Testing infrastructure (testing/)
-//   - Repository files (LICENSE, CONTRIBUTING.md, SECURITY.md)
-//
-// To create a new zoobzio package, use this repository as a GitHub template
-// and update package-specific values.
-package samoa
+// Each zoobzio repository carries its own agent workflows, standing orders,
+// and skills. cldpd spawns pods — Docker containers running Claude Code —
+// pointed at GitHub issues, then streams the team leader's output back
+// to the caller.
+package cldpd

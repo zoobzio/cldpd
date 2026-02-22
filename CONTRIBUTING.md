@@ -1,6 +1,6 @@
-# Contributing to samoa
+# Contributing to cldpd
 
-Thank you for considering contributing to samoa.
+Thank you for considering contributing to cldpd.
 
 ## Development Setup
 

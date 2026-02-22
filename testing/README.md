@@ -1,6 +1,6 @@
 # Testing Infrastructure
 
-This directory contains testing utilities and infrastructure for samoa.
+This directory contains testing utilities and infrastructure for cldpd.
 
 ## Structure
 
@@ -44,7 +44,7 @@ make test-bench
 Import the testing package:
 
 ```go
-import "github.com/zoobzio/samoa/testing"
+import "github.com/zoobzio/cldpd/testing"
 ```
 
 ### Coverage Targets

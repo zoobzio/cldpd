@@ -1,4 +1,4 @@
-module github.com/zoobzio/samoa
+module github.com/zoobzio/cldpd
 
 go 1.24
 

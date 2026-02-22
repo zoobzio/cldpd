@@ -1,7 +1,7 @@
 repository:
-  name: samoa
-  description: Template repository for zoobzio Go packages
-  homepage: https://github.com/zoobzio/samoa
+  name: cldpd
+  description: Pod dispatcher for Claude Code agent teams
+  homepage: https://github.com/zoobzio/cldpd
   has_wiki: true
   has_downloads: true
   default_branch: main
