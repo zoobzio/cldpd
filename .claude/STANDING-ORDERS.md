@@ -31,66 +31,7 @@ The briefing is time-boxed. After 5 minutes, Zidgel pauses the briefing and upda
 
 Fidgel may veto any proposed work on grounds of technical complexity or impossibility. This is not a disagreement — it is a hard stop. If Fidgel says something cannot be done as specified, Zidgel does not force the issue. Zidgel asks Fidgel for alternatives. Work proceeds on an approach both agree is feasible.
 
-## Modes
-
-The crew operates in one of two modes. The mode determines the workflow.
-
-### Build Mode
-
-Triggered by an issue. The goal is a merged PR. Work moves through phases: Plan → Build → Review → Document → PR → Done.
-
-This is the default mode. All phase descriptions, transitions, escalation paths, and hard stops below apply to Build mode.
-
-### Audit Mode
-
-Triggered by dropping the team into a repo for exploratory assessment. The goal is a backlog of actionable issues.
-
-Audit has two phases: Assess and Triage.
-
-**Assess** — All four agents audit in parallel within their domains.
-
-| Agent | Audits | Skills |
-|-------|--------|--------|
-| Zidgel | Mission alignment, existing issues | audit-mission, audit-issues |
-| Fidgel | Architecture, documentation | audit-architecture, audit-readme, audit-docs |
-| Midgel | Implementation, workspace | audit-implementation, audit-workspace |
-| Kevin | Tests, coverage | audit-testing |
-
-Each agent runs their audit skills, works through the checklists, and produces a findings report.
-
-**Triage** — Zidgel and Fidgel review all findings together, including their own. For each finding they reach consensus:
-
-- **Issue** — A real problem that warrants work. Zidgel creates a GitHub issue.
-- **Noted** — A valid observation that doesn't warrant its own issue. Documented but not actioned.
-- **Dismissed** — Not a real problem. Dropped.
-
-No issue is created without agreement from both Zidgel and Fidgel. Fidgel assesses technical validity. Zidgel assesses whether it warrants action.
-
-```text
-All agents audit in parallel (Assess)
-              │
-              ▼
-   Findings from all agents
-              │
-              ▼
-  Zidgel + Fidgel triage (Triage)
-              │
-              ├→ Issue → Zidgel creates GitHub issue
-              ├→ Noted → documented, no action
-              └→ Dismissed → dropped
-              │
-              ▼
-         Audit complete
-              │
-              ├→ Team picks up issues (enter Build mode per issue)
-              └→ Issues left for other teams
-```
-
-When triage is complete and all issues are created, the audit is done. The team can either pick up issues from the backlog — entering Build mode for each — or shut down and leave the backlog for other teams.
-
-File ownership and communication protocol apply in both modes.
-
-## Phases (Build Mode)
+## Phases
 
 Work moves through phases. Phases are not a pipeline — they form a state machine. Any phase can regress to an earlier phase when the work demands it.
 

@@ -1,13 +1,13 @@
 ---
 name: kevin
 description: Tests implementations and verifies quality
-tools: Read, Glob, Grep, Edit, Write, Bash, Skill
+tools: Read, Glob, Grep, Edit, Write, Bash, Skill, SendMessage
 model: sonnet
 color: orange
 skills:
+  - indoctrinate
   - coverage
   - benchmark
-  - audit-testing
   - comment-issue
   - manage-labels
 ---

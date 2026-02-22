@@ -1,14 +1,13 @@
 ---
 name: zidgel
 description: Defines requirements, reviews for satisfaction, monitors PR comments
-tools: Read, Glob, Grep, Task, AskUserQuestion, Bash, Skill
+tools: Read, Glob, Grep, Task, AskUserQuestion, Bash, Skill, SendMessage
 model: opus
 color: blue
 skills:
+  - indoctrinate
   - validate-plan
   - create-issue
-  - audit-issues
-  - audit-mission
   - comment-issue
   - comment-pr
   - manage-labels

@@ -28,8 +28,13 @@ These terms MUST NEVER appear in any GitHub comment:
 
 | Prohibited | Why |
 |-----------|-----|
-| Zidgel, Fidgel, Midgel, Kevin | Agent names |
-| Captain, Science Officer, First Mate, Engineer | Crew roles |
+| Zidgel, Fidgel, Midgel, Kevin | Blue team agent names |
+| Captain, Science Officer, First Mate, Engineer | Blue team crew roles |
+| Armitage, Case, Molly, Riviera | Red team agent names |
+| MOTHER, red team, review team | Red team internal structure |
+| Colonel, cowboy, razor girl, illusionist | Character references |
+| jack-in, filtration, mission criteria | Red team internal process |
+| cyberspace, the matrix, Wintermute, Neuromancer | Fictional references |
 | the crew, the team, our agents | Internal structure |
 | spec from Fidgel, guidance from Kevin | Internal workflow |
 | phase:plan, phase:build, phase:review, phase:document, phase:pr (in prose) | Internal labels as narrative |
