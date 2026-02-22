@@ -518,6 +518,21 @@ func TestDiscoverPod_Mount_NoTildeUnchanged(t *testing.T) {
 	}
 }
 
+func TestDiscoverPod_Mount_TildeUsernameNotExpanded(t *testing.T) {
+	// ~username form is not supported; the source is returned unchanged.
+	podsDir := t.TempDir()
+	dir := makePodDir(t, podsDir, "mypod")
+	writePodJSON(t, dir, `{"mounts": [{"source": "~alice/keys", "target": "/root/.ssh/id_ed25519"}]}`)
+
+	pod, err := DiscoverPod(podsDir, "mypod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pod.Config.Mounts[0].Source != "~alice/keys" {
+		t.Errorf("Mount.Source: got %q, want %q (tilde-username must not be expanded)", pod.Config.Mounts[0].Source, "~alice/keys")
+	}
+}
+
 func TestDiscoverAll_Template_IncludedForPodsWithTemplate(t *testing.T) {
 	podsDir := t.TempDir()
 	dir := makePodDir(t, podsDir, "podwithtemplate")

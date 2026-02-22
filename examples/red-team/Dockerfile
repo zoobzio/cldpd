@@ -1,3 +1,5 @@
+# NOTE: For production use, pin node:22-slim to a specific digest
+# and specify a version for @anthropic-ai/claude-code.
 FROM node:22-slim
 
 # Install git and SSH client
