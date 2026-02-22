@@ -17,8 +17,8 @@ type Pod struct {
 	Name       string    // directory name, used as the pod identifier
 	Dir        string    // absolute path to the pod directory
 	Dockerfile string    // absolute path to the Dockerfile within Dir
-	Config     PodConfig // parsed from pod.json; zero-value if pod.json is absent
 	Template   string    // contents of template.md; empty string if absent
+	Config     PodConfig // parsed from pod.json; zero-value if pod.json is absent
 }
 
 // PodConfig holds the optional configuration parsed from a pod's pod.json file.
