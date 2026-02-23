@@ -8,16 +8,25 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
 
 // mockRunner is a test double for Runner.
 type mockRunner struct {
-	buildFn func(ctx context.Context, tag string, dir string, buildArgs map[string]string) error
-	runFn   func(ctx context.Context, opts RunOptions, stdout io.Writer) (int, error)
-	execFn  func(ctx context.Context, container string, cmd []string, stdout io.Writer) (int, error)
-	stopFn  func(ctx context.Context, container string, timeout time.Duration) error
+	preflightFn func(ctx context.Context) error
+	buildFn     func(ctx context.Context, tag string, dir string, buildArgs map[string]string) error
+	runFn       func(ctx context.Context, opts RunOptions, stdout io.Writer) (int, error)
+	execFn      func(ctx context.Context, container string, cmd []string, stdout io.Writer) (int, error)
+	stopFn      func(ctx context.Context, container string, timeout time.Duration) error
+}
+
+func (m *mockRunner) Preflight(ctx context.Context) error {
+	if m.preflightFn != nil {
+		return m.preflightFn(ctx)
+	}
+	return nil
 }
 
 func (m *mockRunner) Build(ctx context.Context, tag string, dir string, buildArgs map[string]string) error {
@@ -501,5 +510,77 @@ func TestDockerRunner_Run_WithEnvAndWorkdir(t *testing.T) {
 	output := buf.String()
 	if output == "" {
 		t.Error("expected output from env var, got empty")
+	}
+}
+
+func TestDockerRunner_Stop_RunningContainer(t *testing.T) {
+	if !dockerAvailable() {
+		t.Skip("Docker not available")
+	}
+	// Start a long-running container in detached mode.
+	containerName := "cldpd-test-unit-stop-running"
+	start := exec.Command("docker", "run", "-d", "--name", containerName, "alpine:latest", "sleep", "60")
+	start.Stdout = io.Discard
+	start.Stderr = io.Discard
+	if err := start.Run(); err != nil {
+		t.Skipf("could not start container: %v", err)
+	}
+	defer exec.Command("docker", "rm", "-f", containerName).Run() //nolint:errcheck
+
+	r := &DockerRunner{}
+	err := r.Stop(context.Background(), containerName, 5*time.Second)
+	if err != nil {
+		t.Errorf("Stop running container: got %v, want nil", err)
+	}
+
+	// Verify container is stopped (not running). docker stop doesn't remove — it stops.
+	out, inspectErr := exec.Command("docker", "inspect", "--format", "{{.State.Running}}", containerName).Output()
+	if inspectErr != nil {
+		// Container was removed (e.g. by --rm on start) — also acceptable.
+		return
+	}
+	if strings.TrimSpace(string(out)) != "false" {
+		t.Errorf("container still running after Stop; State.Running = %q", strings.TrimSpace(string(out)))
+	}
+}
+
+func TestDockerRunner_Stop_NoSuchContainer(t *testing.T) {
+	if !dockerAvailable() {
+		t.Skip("Docker not available")
+	}
+	// Stopping a nonexistent container must return nil, not ErrStopFailed.
+	r := &DockerRunner{}
+	err := r.Stop(context.Background(), "cldpd-test-unit-stop-nonexistent", 5*time.Second)
+	if err != nil {
+		t.Errorf("Stop nonexistent container: got %v, want nil", err)
+	}
+}
+
+func TestDockerRunner_Stop_ZeroTimeout_UsesFloor(t *testing.T) {
+	if !dockerAvailable() {
+		t.Skip("Docker not available")
+	}
+	// A zero timeout must be clamped to 1 second minimum.
+	// We test this by stopping a nonexistent container with 0 timeout —
+	// the call must complete (not hang) and return nil.
+	r := &DockerRunner{}
+	err := r.Stop(context.Background(), "cldpd-test-unit-stop-zero-timeout", 0)
+	if err != nil {
+		t.Errorf("Stop with zero timeout: got %v, want nil (nonexistent container)", err)
+	}
+}
+
+func TestDockerRunner_Stop_ContextCancelled(t *testing.T) {
+	if !dockerAvailable() {
+		t.Skip("Docker not available")
+	}
+	// A pre-cancelled context causes exec.CommandContext to fail before the
+	// process starts, returning a non-ExitError. Stop must return ErrStopFailed.
+	r := &DockerRunner{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := r.Stop(ctx, "cldpd-test-unit-stop-cancelled", 10*time.Second)
+	if !errors.Is(err, ErrStopFailed) {
+		t.Errorf("Stop with cancelled context: got %v, want ErrStopFailed", err)
 	}
 }

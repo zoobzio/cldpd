@@ -19,10 +19,18 @@ import (
 
 // testRunner implements cldpd.Runner for use in CLI tests.
 type testRunner struct {
-	buildFn func(ctx context.Context, tag string, dir string, buildArgs map[string]string) error
-	runFn   func(ctx context.Context, opts cldpd.RunOptions, stdout io.Writer) (int, error)
-	execFn  func(ctx context.Context, container string, cmd []string, stdout io.Writer) (int, error)
-	stopFn  func(ctx context.Context, container string, timeout time.Duration) error
+	preflightFn func(ctx context.Context) error
+	buildFn     func(ctx context.Context, tag string, dir string, buildArgs map[string]string) error
+	runFn       func(ctx context.Context, opts cldpd.RunOptions, stdout io.Writer) (int, error)
+	execFn      func(ctx context.Context, container string, cmd []string, stdout io.Writer) (int, error)
+	stopFn      func(ctx context.Context, container string, timeout time.Duration) error
+}
+
+func (r *testRunner) Preflight(ctx context.Context) error {
+	if r.preflightFn != nil {
+		return r.preflightFn(ctx)
+	}
+	return nil
 }
 
 func (r *testRunner) Build(ctx context.Context, tag string, dir string, buildArgs map[string]string) error {
@@ -438,5 +446,91 @@ func TestConsumeSession_InterruptCallsStop(t *testing.T) {
 		// consumeSession returned.
 	case <-time.After(2 * time.Second):
 		t.Fatal("consumeSession did not return within 2s after Stop")
+	}
+}
+
+func TestRun_Dispatch(t *testing.T) {
+	// run() reads os.Args directly. We restore it after each subtest.
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+
+	// Redirect stderr to suppress noise from run() calls.
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open devnull: %v", err)
+	}
+	defer devnull.Close()
+
+	cases := []struct {
+		name     string
+		args     []string
+		wantCode int
+	}{
+		{
+			name:     "no args",
+			args:     []string{"cldpd"},
+			wantCode: 1,
+		},
+		{
+			name:     "unknown subcommand",
+			args:     []string{"cldpd", "launch"},
+			wantCode: 1,
+		},
+		{
+			name:     "help subcommand",
+			args:     []string{"cldpd", "help"},
+			wantCode: 0,
+		},
+		{
+			name:     "--help flag",
+			args:     []string{"cldpd", "--help"},
+			wantCode: 0,
+		},
+		{
+			name:     "start missing pod name",
+			args:     []string{"cldpd", "start", "--issue", "https://github.com/org/repo/issues/1"},
+			wantCode: 1,
+		},
+		{
+			name:     "resume missing pod name",
+			args:     []string{"cldpd", "resume", "--prompt", "do something"},
+			wantCode: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			os.Args = tc.args
+			old := os.Stderr
+			os.Stderr = devnull
+			code := run(context.Background())
+			os.Stderr = old
+			if code != tc.wantCode {
+				t.Errorf("run(%v): got code %d, want %d", tc.args, code, tc.wantCode)
+			}
+		})
+	}
+}
+
+func TestPrintUsage(t *testing.T) {
+	// Redirect stderr and verify printUsage writes something containing "Usage:".
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	old := os.Stderr
+	os.Stderr = pw
+
+	printUsage()
+
+	pw.Close()
+	os.Stderr = old
+
+	var buf bytes.Buffer
+	io.Copy(&buf, pr) //nolint:errcheck
+	pr.Close()
+
+	if !strings.Contains(buf.String(), "Usage:") {
+		t.Errorf("printUsage output missing 'Usage:': %q", buf.String())
 	}
 }
