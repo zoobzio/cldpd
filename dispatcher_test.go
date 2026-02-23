@@ -235,9 +235,8 @@ func TestDispatcher_Start_RunOptions_Image(t *testing.T) {
 	}
 }
 
-func TestDispatcher_Start_ContainerName_IsSessionID(t *testing.T) {
-	// Container name is now the session ID, not cldpd-<podName>.
-	// Session ID format: <podName>-<hex8>.
+func TestDispatcher_Start_ContainerName_IsDeterministic(t *testing.T) {
+	// Container name must be the deterministic cldpd-<podName>, not the session ID.
 	podsDir := t.TempDir()
 	makeTestPod(t, podsDir, "myrepo")
 
@@ -256,9 +255,8 @@ func TestDispatcher_Start_ContainerName_IsSessionID(t *testing.T) {
 	}
 	drainSession(t, s, 2*time.Second)
 
-	re := regexp.MustCompile(`^myrepo-[0-9a-f]{8}$`)
-	if !re.MatchString(capturedName) {
-		t.Errorf("container name: got %q, want format myrepo-<8 hex chars>", capturedName)
+	if capturedName != "cldpd-myrepo" {
+		t.Errorf("container name: got %q, want %q", capturedName, "cldpd-myrepo")
 	}
 }
 
@@ -411,8 +409,9 @@ func TestDispatcher_Start_InheritEnv_MergedIntoRunOptions(t *testing.T) {
 	}
 }
 
-func TestDispatcher_Start_InheritEnv_EmptyHostVar_NotMerged(t *testing.T) {
-	// If the host env var is empty/unset, it should not appear in Env.
+func TestDispatcher_Start_InheritEnv_EmptyHostVar_DeferredToDocker(t *testing.T) {
+	// If the host env var is unset, it must NOT appear in Env (eager-resolved),
+	// but MUST appear in InheritEnv (deferred to Docker as bare -e NAME).
 	podsDir := t.TempDir()
 	makeTestPod(t, podsDir, "myrepo")
 	dir := filepath.Join(podsDir, "myrepo")
@@ -438,7 +437,72 @@ func TestDispatcher_Start_InheritEnv_EmptyHostVar_NotMerged(t *testing.T) {
 	drainSession(t, s, 2*time.Second)
 
 	if _, ok := capturedOpts.Env["DEFINITELY_NOT_SET_XYZ123"]; ok {
-		t.Error("unset InheritEnv var should not appear in RunOptions.Env")
+		t.Error("unset InheritEnv var must not appear in RunOptions.Env")
+	}
+	found := false
+	for _, name := range capturedOpts.InheritEnv {
+		if name == "DEFINITELY_NOT_SET_XYZ123" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("unset InheritEnv var must appear in RunOptions.InheritEnv; got %v", capturedOpts.InheritEnv)
+	}
+}
+
+func TestDispatcher_Start_InheritEnv_MixedVars_TwoTierResolution(t *testing.T) {
+	// Set vars go into RunOptions.Env; unset vars go into RunOptions.InheritEnv.
+	podsDir := t.TempDir()
+	makeTestPod(t, podsDir, "myrepo")
+	dir := filepath.Join(podsDir, "myrepo")
+	if err := os.WriteFile(filepath.Join(dir, "pod.json"),
+		[]byte(`{"inheritEnv": ["TEST_SET_VAR_ABC", "TEST_UNSET_VAR_XYZ"]}`), 0644); err != nil {
+		t.Fatalf("write pod.json: %v", err)
+	}
+
+	t.Setenv("TEST_SET_VAR_ABC", "hello")
+	os.Unsetenv("TEST_UNSET_VAR_XYZ")
+
+	var capturedOpts RunOptions
+	r := &mockRunner{
+		runFn: func(_ context.Context, opts RunOptions, _ io.Writer) (int, error) {
+			capturedOpts = opts
+			return 0, nil
+		},
+	}
+	d := NewDispatcher(podsDir, r)
+
+	s, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	drainSession(t, s, 2*time.Second)
+
+	// Set var must be eagerly resolved into Env.
+	if capturedOpts.Env["TEST_SET_VAR_ABC"] != "hello" {
+		t.Errorf("set InheritEnv var: Env[TEST_SET_VAR_ABC] = %q, want %q", capturedOpts.Env["TEST_SET_VAR_ABC"], "hello")
+	}
+	// Set var must NOT also appear in InheritEnv.
+	for _, name := range capturedOpts.InheritEnv {
+		if name == "TEST_SET_VAR_ABC" {
+			t.Error("set InheritEnv var must not appear in RunOptions.InheritEnv")
+		}
+	}
+	// Unset var must NOT appear in Env.
+	if _, ok := capturedOpts.Env["TEST_UNSET_VAR_XYZ"]; ok {
+		t.Error("unset InheritEnv var must not appear in RunOptions.Env")
+	}
+	// Unset var must appear in InheritEnv.
+	foundUnset := false
+	for _, name := range capturedOpts.InheritEnv {
+		if name == "TEST_UNSET_VAR_XYZ" {
+			foundUnset = true
+			break
+		}
+	}
+	if !foundUnset {
+		t.Errorf("unset InheritEnv var must appear in RunOptions.InheritEnv; got %v", capturedOpts.InheritEnv)
 	}
 }
 
@@ -477,11 +541,14 @@ func TestDispatcher_Start_Mounts_PassedThrough(t *testing.T) {
 	}
 }
 
-func TestDispatcher_Start_ConcurrentCalls_UniqueContainerNames(t *testing.T) {
+func TestDispatcher_Start_ConcurrentCalls_DeterministicContainerNames(t *testing.T) {
+	// Two Start calls for the same pod must produce the same deterministic container name.
+	// Session IDs remain unique; the container name does not.
 	podsDir := t.TempDir()
 	makeTestPod(t, podsDir, "myrepo")
 
 	var names []string
+	var sessionIDs []string
 	r := &mockRunner{
 		runFn: func(_ context.Context, opts RunOptions, _ io.Writer) (int, error) {
 			names = append(names, opts.Name)
@@ -490,24 +557,33 @@ func TestDispatcher_Start_ConcurrentCalls_UniqueContainerNames(t *testing.T) {
 	}
 	d := NewDispatcher(podsDir, r)
 
-	// Start twice sequentially; names must differ.
 	s1, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1")
 	if err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
+	sessionIDs = append(sessionIDs, s1.ID())
 	drainSession(t, s1, 2*time.Second)
 
 	s2, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1")
 	if err != nil {
 		t.Fatalf("second Start: %v", err)
 	}
+	sessionIDs = append(sessionIDs, s2.ID())
 	drainSession(t, s2, 2*time.Second)
 
 	if len(names) != 2 {
 		t.Fatalf("expected 2 container names, got %d", len(names))
 	}
-	if names[0] == names[1] {
-		t.Errorf("two Start calls produced same container name: %q", names[0])
+	// Container names must be identical (deterministic).
+	if names[0] != names[1] {
+		t.Errorf("container names differ: %q vs %q; want both %q", names[0], names[1], "cldpd-myrepo")
+	}
+	if names[0] != "cldpd-myrepo" {
+		t.Errorf("container name: got %q, want %q", names[0], "cldpd-myrepo")
+	}
+	// Session IDs must remain unique.
+	if sessionIDs[0] == sessionIDs[1] {
+		t.Errorf("session IDs must be unique, both were %q", sessionIDs[0])
 	}
 }
 
@@ -531,6 +607,54 @@ func TestDispatcher_Resume_ContainerName(t *testing.T) {
 
 	if execContainer != "cldpd-myrepo" {
 		t.Errorf("container: got %q, want %q", execContainer, "cldpd-myrepo")
+	}
+}
+
+func TestDispatcher_Start_Resume_RoundTrip(t *testing.T) {
+	// Start and Resume for the same pod must target the same container name.
+	// This is the round-trip test: proves the naming schemes are compatible.
+	podsDir := t.TempDir()
+	makeTestPod(t, podsDir, "myrepo")
+
+	var startContainer string
+	var resumeContainer string
+
+	startRunner := &mockRunner{
+		runFn: func(_ context.Context, opts RunOptions, _ io.Writer) (int, error) {
+			startContainer = opts.Name
+			return 0, nil
+		},
+	}
+	d := NewDispatcher(podsDir, startRunner)
+
+	s, err := d.Start(context.Background(), "myrepo", "https://github.com/org/repo/issues/1")
+	if err != nil {
+		t.Fatalf("Start: unexpected error: %v", err)
+	}
+	drainSession(t, s, 2*time.Second)
+
+	resumeRunner := &mockRunner{
+		execFn: func(_ context.Context, container string, _ []string, _ io.Writer) (int, error) {
+			resumeContainer = container
+			return 0, nil
+		},
+	}
+	d2 := NewDispatcher(podsDir, resumeRunner)
+
+	r, err := d2.Resume(context.Background(), "myrepo", "continue")
+	if err != nil {
+		t.Fatalf("Resume: unexpected error: %v", err)
+	}
+	drainSession(t, r, 2*time.Second)
+
+	if startContainer == "" {
+		t.Fatal("Start did not capture container name")
+	}
+	if resumeContainer == "" {
+		t.Fatal("Resume did not capture container name")
+	}
+	if startContainer != resumeContainer {
+		t.Errorf("container name mismatch: Start used %q, Resume used %q", startContainer, resumeContainer)
 	}
 }
 

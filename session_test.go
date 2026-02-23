@@ -503,3 +503,41 @@ func TestSession_LifecycleEvents_NeverDropped(t *testing.T) {
 		t.Errorf("EventContainerExited: got %d, want 1", typeCount[EventContainerExited])
 	}
 }
+
+func TestSession_Wait_ExitCode_NotStale_AfterHighVolume(t *testing.T) {
+	// Task #4: exit code is written before pw.Close() — Wait() must never return
+	// a stale zero value. Run under go test -race to surface any ordering violation.
+	lines := make([]string, eventChannelBuffer*2)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i)
+	}
+
+	s := newSession("sid", "ctn", &mockRunner{}, writingRunFn(lines, 42, nil), nil)
+	code, err := waitForDone(t, s, 5*time.Second)
+	if err != nil {
+		t.Errorf("Wait error: got %v, want nil", err)
+	}
+	if code != 42 {
+		t.Errorf("exit code: got %d, want 42 (stale zero would indicate a race)", code)
+	}
+}
+
+func TestSession_Wait_DoesNotDeadlock_WhenEventsNotConsumed(t *testing.T) {
+	// Task #2: Wait() must return even when Events() is never consumed and the
+	// event buffer fills. The fix closes done before emitting the terminal event,
+	// so Wait() unblocks regardless of channel state.
+	lines := make([]string, eventChannelBuffer*3)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i)
+	}
+
+	s := newSession("sid", "ctn", &mockRunner{}, writingRunFn(lines, 0, nil), nil)
+	// Deliberately do NOT call s.Events() — channel is never consumed.
+	code, err := waitForDone(t, s, 5*time.Second)
+	if err != nil {
+		t.Errorf("Wait error: got %v, want nil", err)
+	}
+	if code != 0 {
+		t.Errorf("exit code: got %d, want 0", code)
+	}
+}

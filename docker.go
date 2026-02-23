@@ -23,6 +23,10 @@ type Mount struct {
 // All methods block until the operation completes and stream output to the
 // provided io.Writer where applicable.
 type Runner interface {
+	// Preflight checks that the Docker daemon is reachable.
+	// Returns ErrDockerUnavailable if the daemon cannot be contacted.
+	Preflight(ctx context.Context) error
+
 	// Build builds a Docker image tagged with tag from the Dockerfile in dir.
 	// buildArgs are passed as --build-arg K=V flags.
 	// Returns ErrBuildFailed if the build exits with a non-zero status.

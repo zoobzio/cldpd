@@ -90,16 +90,22 @@ func (d *Dispatcher) Start(ctx context.Context, podName string, issueURL string)
 	}
 
 	sessionID := newSessionID(podName)
-	container := sessionID
+	container := containerName(podName)
 
-	// Resolve InheritEnv: read host env vars, merge into a copy of pod.Config.Env.
+	// Resolve InheritEnv two ways: names whose values are present on the host
+	// are eagerly resolved into Env (passed as -e K=V). Names not set on the
+	// host are deferred to Docker via InheritEnv (passed as bare -e NAME),
+	// allowing Docker to inherit them from the host environment at run time.
 	env := make(map[string]string, len(pod.Config.Env))
 	for k, v := range pod.Config.Env {
 		env[k] = v
 	}
+	var inheritEnv []string
 	for _, name := range pod.Config.InheritEnv {
 		if v := os.Getenv(name); v != "" {
 			env[name] = v
+		} else {
+			inheritEnv = append(inheritEnv, name)
 		}
 	}
 
@@ -109,13 +115,14 @@ func (d *Dispatcher) Start(ctx context.Context, podName string, issueURL string)
 	}
 
 	opts := RunOptions{
-		Image:   tag,
-		Name:    container,
-		Cmd:     []string{"claude", "-p", prompt},
-		Env:     env,
-		Workdir: pod.Config.Workdir,
-		Remove:  true,
-		Mounts:  pod.Config.Mounts,
+		Image:      tag,
+		Name:       container,
+		Cmd:        []string{"claude", "-p", prompt},
+		Env:        env,
+		InheritEnv: inheritEnv,
+		Workdir:    pod.Config.Workdir,
+		Remove:     true,
+		Mounts:     pod.Config.Mounts,
 	}
 
 	containerStarted := Event{
@@ -166,7 +173,7 @@ func (d *Dispatcher) Resume(ctx context.Context, podName string, prompt string) 
 }
 
 // containerName returns the deterministic Docker container name for a pod.
-// Kept for Resume, which must target an existing container by pod name.
+// Used by both Start (to name the new container) and Resume (to target the running one).
 func containerName(podName string) string {
 	return "cldpd-" + podName
 }

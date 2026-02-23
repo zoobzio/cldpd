@@ -135,7 +135,7 @@ cldpd start <pod> --issue <url>
 ```
 
 - Builds the Docker image from the pod's Dockerfile
-- Starts a container with a unique session ID (`<pod>-<hex8>`)
+- Starts a container named `cldpd-<pod>`
 - Runs `claude -p "<prompt>"` inside the container (if `template.md` exists, its contents are prepended to the prompt)
 - Streams output events to your terminal, errors to stderr
 - Handles Ctrl+C gracefully (SIGTERM with 10-second timeout)

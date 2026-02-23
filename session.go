@@ -38,15 +38,14 @@ type Session struct {
 	exitCode int
 }
 
-// newSession creates a Session and starts its goroutines. pipeReader is the read
-// end of a pipe connected to the container's stdout. The caller must ensure the
-// container is already running (or starting) before calling newSession.
+// newSession creates a Session and starts its goroutines.
 //
 // The goroutine sequence:
-//  1. container goroutine: calls runFn, stores result, closes pipeWriter.
-//  2. event goroutine: reads lines from pipeReader, emits EventOutput, then emits terminal event.
+//  1. container goroutine: calls runFn, writes exitCode/exitErr under mutex, closes pipeWriter.
+//  2. event goroutine: reads lines from pipeReader, emits EventOutput, closes done, then emits terminal event.
 //
-// preamble events are emitted synchronously before goroutines start.
+// done is closed before the terminal event is emitted, so Wait() never blocks on
+// event consumption. preamble events are emitted synchronously before goroutines start.
 func newSession(
 	id string,
 	container string,
@@ -72,13 +71,15 @@ func newSession(
 	// Container goroutine: runs the container, stores result, closes the pipe.
 	go func() {
 		code, err := runFn(pw)
-		// Close the write end of the pipe; signals EOF to the event goroutine.
-		// PipeWriter.Close always returns nil, but the error is checked to satisfy errcheck.
-		_ = pw.Close()
+		// Write results under mutex before closing the pipe. Closing pw signals
+		// EOF to the event goroutine; by writing first, we guarantee the event
+		// goroutine observes committed values when it reads after EOF.
 		s.mu.Lock()
 		s.exitCode = code
 		s.exitErr = err
 		s.mu.Unlock()
+		// PipeWriter.Close always returns nil, but the error is checked to satisfy errcheck.
+		_ = pw.Close()
 	}()
 
 	// Event goroutine: reads lines from pipeReader, emits events, then closes channel.
@@ -95,37 +96,48 @@ func newSession(
 		// PipeReader.Close always returns nil, but the error is checked to satisfy errcheck.
 		_ = pr.Close()
 
-		// Read the result stored by the container goroutine. The pipe is closed,
-		// so the container goroutine has already written its result.
+		// Read the result stored by the container goroutine. EOF guarantees the
+		// container goroutine has already committed exitCode/exitErr under its mutex.
 		s.mu.Lock()
 		code := s.exitCode
 		err := s.exitErr
 		s.mu.Unlock()
 
+		// Signal Wait BEFORE emitting the terminal event. This ensures Wait()
+		// never deadlocks even if the event channel is full.
+		s.once.Do(func() { close(s.done) })
+
+		// Emit terminal event with a non-blocking send. If the channel is full,
+		// the event is lost, but Wait() has already been unblocked. Callers who
+		// consume Events() will see the channel close as the terminal signal.
+		var terminal Event
 		if err != nil {
-			s.emitLifecycle(Event{
+			terminal = Event{
 				Type: EventError,
 				Data: err.Error(),
 				Time: time.Now(),
-			})
+			}
 		} else {
-			s.emitLifecycle(Event{
+			terminal = Event{
 				Type: EventContainerExited,
 				Code: code,
 				Time: time.Now(),
-			})
+			}
+		}
+		select {
+		case s.events <- terminal:
+		default:
 		}
 
 		close(s.events)
-		// Signal Wait that the session is done.
-		s.once.Do(func() { close(s.done) })
 	}()
 
 	return s
 }
 
 // emitLifecycle sends a lifecycle event to the channel, blocking until delivered.
-// Lifecycle events must never be dropped.
+// Used only for preamble events emitted synchronously before goroutines start,
+// when the channel buffer is empty and blocking is safe.
 func (s *Session) emitLifecycle(e Event) {
 	s.events <- e
 }
@@ -149,11 +161,11 @@ func (s *Session) ID() string {
 // after the terminal event (ContainerExited or Error). Callers may range over
 // this channel to consume the full event stream.
 //
-// Warning: if the caller never consumes Events(), the channel buffer (256) will
-// fill under high output volume. Once full, the terminal lifecycle event blocks
-// until space is available, which means Wait() will also block indefinitely.
-// Either consume Events() or use Stop/Wait without consuming events only when
-// container output is known to be low-volume.
+// Consuming Events() is optional. Wait() returns as soon as the container exits,
+// independent of whether Events() is consumed. Under high output volume, output
+// events may be dropped if the buffer fills; the terminal event may also be
+// dropped if the buffer is full when the container exits, but the channel is
+// always closed as the definitive terminal signal.
 func (s *Session) Events() <-chan Event {
 	return s.events
 }
@@ -175,8 +187,8 @@ func (s *Session) Stop(ctx context.Context) error {
 		return fmt.Errorf("stop session %s: %w", s.id, err)
 	}
 
-	// Wait for the container goroutine to finish (pipe closes, event goroutine
-	// emits terminal event, done channel closes).
+	// Wait for the event goroutine to finish (done channel closes, then terminal
+	// event emitted, then events channel closed).
 	select {
 	case <-s.done:
 		return nil
